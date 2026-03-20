@@ -1,0 +1,35 @@
+{
+  "name": "dsa-revision-helper",
+  "displayName": "DSA Revision — Auto Capture",
+  "version": "1.0.0",
+  "description": "Automatically capture your LeetCode and GFG solutions for better revision.",
+  "author": "DSA Revision",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "plasmo dev",
+    "build": "plasmo build",
+    "package": "plasmo package"
+  },
+  "dependencies": {
+    "@clerk/browser": "^5.0.0",
+    "plasmo": "0.89.4",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.0.301",
+    "@types/node": "22.10.5",
+    "@types/react": "19.0.4",
+    "@types/react-dom": "19.0.2",
+    "typescript": "5.7.2"
+  },
+  "manifest": {
+    "host_permissions": [
+      "https://leetcode.com/*",
+      "https://geeksforgeeks.org/*",
+      "https://your-domain.com/*"
+    ],
+    "permissions": ["storage", "webRequest", "declarativeNetRequest"]
+  }
+}

@@ -1,0 +1,350 @@
+// ============================================================
+// DSA Revision Platform — Prisma Schema
+// Database: PostgreSQL
+// Version: 1.0
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+  // Enables full-text search on PostgreSQL
+  previewFeatures = ["fullTextSearch", "fullTextIndex"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+/// Difficulty level of a DSA problem as reported by the source platform
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+  UNKNOWN
+}
+
+/// Source platform from which the problem was imported
+enum Platform {
+  LEETCODE
+  GFG
+  CODEFORCES
+  MANUAL
+}
+
+/// Programming language the user submitted their solution in
+enum Language {
+  PYTHON
+  JAVA
+  CPP
+  JAVASCRIPT
+  TYPESCRIPT
+  GO
+  RUST
+  KOTLIN
+  SWIFT
+  CSHARP
+}
+
+/// Status of an AI note generation job
+enum AiNotesStatus {
+  PENDING    // Job enqueued in BullMQ
+  PROCESSING // Claude API call in progress
+  DONE       // Notes successfully generated and saved
+  FAILED     // Claude API call failed after retries
+}
+
+/// Status of a LeetCode bulk import job
+enum ImportJobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+/// The quality rating a user gives after reviewing a problem in revision mode.
+/// Mirrors SM-2 algorithm quality grades (0–5 are standard; we map to simpler labels)
+enum RecallRating {
+  AGAIN // Quality 0 — Complete blackout, couldn't recall at all
+  HARD  // Quality 3 — Recalled with serious difficulty
+  GOOD  // Quality 4 — Recalled with minor hesitation
+  EASY  // Quality 5 — Perfect recall with no hesitation
+}
+
+// ============================================================
+// TABLE: User
+// Mirrors the Clerk user record. Clerk is the source of truth
+// for auth; we store a local shadow record for FK relationships.
+// ============================================================
+model User {
+  id        String   @id @default(cuid())         // matches Clerk's userId
+  email     String   @unique
+  name      String?
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  problems     Problem[]
+  revisionCards RevisionCard[]
+  revisionLogs  RevisionLog[]
+  importJobs    ImportJob[]
+  dailyStats    DailyStats[]
+  streakRecord  StreakRecord?
+
+  @@index([email])
+  @@map("users")
+}
+
+// ============================================================
+// TABLE: Problem
+// Central entity — one row per unique problem per user.
+// If the user solved the same LeetCode problem twice (re-submitted),
+// we keep the latest accepted submission's code.
+// ============================================================
+model Problem {
+  id              String     @id @default(cuid())
+  userId          String
+
+  // Problem identity
+  title           String
+  slug            String                           // e.g. "two-sum", used for URL routing
+  platform        Platform   @default(LEETCODE)
+  platformId      String?                          // LeetCode's internal problem ID (e.g. "1")
+  platformUrl     String?                          // Link back to original problem
+
+  // Problem metadata
+  difficulty      Difficulty @default(UNKNOWN)
+  tags            String[]   @default([])          // e.g. ["array", "hash-table", "two-pointers"]
+  companies       String[]   @default([])          // e.g. ["Google", "Amazon"] — from LeetCode premium
+  isPremium       Boolean    @default(false)
+
+  // User's solution
+  solutionCode    String                           // The raw code the user submitted
+  language        Language
+  submittedAt     DateTime?                        // When the user originally submitted on the platform
+
+  // Import tracking
+  importedVia     String     @default("manual")   // "cookie_import" | "extension" | "manual"
+  importJobId     String?                          // FK to ImportJob that brought this in
+
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  // Relations
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  importJob       ImportJob?     @relation(fields: [importJobId], references: [id])
+  aiNotes         AiNotes?
+  revisionCard    RevisionCard?
+  revisionLogs    RevisionLog[]
+
+  // A user cannot have duplicate problems from the same platform
+  @@unique([userId, platform, platformId])
+  // Composite index for the most common query: list all problems for a user
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, difficulty])
+  @@index([userId, platform])
+  // GIN index for array tags (enables efficient tag filtering)
+  // Note: GIN indexes on arrays are added via raw SQL migration, not Prisma schema
+  @@map("problems")
+}
+
+// ============================================================
+// TABLE: AiNotes
+// One-to-one with Problem. Stores Claude-generated notes.
+// Separated from Problem to keep the problems table lean and
+// allow lazy generation (not every problem needs notes immediately).
+// ============================================================
+model AiNotes {
+  id        String       @id @default(cuid())
+  problemId String       @unique
+
+  status    AiNotesStatus @default(PENDING)
+
+  // Structured content from Claude — stored as JSON
+  // Shape: { keyInsight, bruteForce, betterApproach, optimalApproach, approaches[] }
+  content   Json?
+
+  // Raw prompt sent to Claude (for debugging/re-generation)
+  promptUsed    String?
+  // Model version used (so we know when to auto-regenerate with newer model)
+  modelVersion  String?   @default("claude-sonnet-4-20250514")
+
+  // How many times user regenerated notes (rate limit: 3/day)
+  regenerateCount Int     @default(0)
+  lastRegeneratedAt DateTime?
+
+  errorMessage  String?  // stores failure reason if status == FAILED
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  problem   Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  @@index([status])  // for background job to pick up PENDING notes
+  @@map("ai_notes")
+}
+
+// ============================================================
+// TABLE: RevisionCard
+// One-to-one with Problem. Stores SM-2 spaced repetition state.
+// This is analogous to an Anki card — it holds the scheduling data.
+// ============================================================
+model RevisionCard {
+  id        String @id @default(cuid())
+  userId    String
+  problemId String @unique
+
+  // SM-2 Algorithm State Fields
+  // Reference: https://www.supermemo.com/en/blog/application-of-a-computer-to-implement-the-optimal-spaced-repetition-learning-process
+  easeFactor    Float    @default(2.5)  // EF: starts at 2.5, range [1.3, ∞)
+  interval      Int      @default(1)   // Days until next review (starts at 1)
+  repetition    Int      @default(0)   // How many times successfully reviewed in a row
+  dueDate       DateTime @default(now()) // Date this card is next due for review
+  lastReviewedAt DateTime?
+
+  // Aggregated stats per card
+  totalReviews  Int  @default(0)
+  againCount    Int  @default(0)
+  hardCount     Int  @default(0)
+  goodCount     Int  @default(0)
+  easyCount     Int  @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problem   Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  // The most critical query: "give me all cards due today for this user"
+  @@index([userId, dueDate])
+  @@map("revision_cards")
+}
+
+// ============================================================
+// TABLE: RevisionLog
+// Immutable append-only audit log of every revision session event.
+// We never update or delete these rows — they're the source of
+// truth for analytics (streaks, heatmap, weak topics).
+// ============================================================
+model RevisionLog {
+  id           String       @id @default(cuid())
+  userId       String
+  problemId    String
+
+  rating       RecallRating
+  // Snapshot of SM-2 state BEFORE this review (for debugging)
+  easeFactorBefore Float
+  intervalBefore   Int
+  // Snapshot of SM-2 state AFTER this review
+  easeFactorAfter  Float
+  intervalAfter    Int
+  nextDueDate      DateTime
+
+  reviewedAt   DateTime     @default(now())
+
+  // Relations
+  user         User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problem      Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  @@index([userId, reviewedAt(sort: Desc)])
+  @@index([userId, problemId])
+  @@map("revision_logs")
+}
+
+// ============================================================
+// TABLE: ImportJob
+// Tracks bulk LeetCode/GFG import jobs.
+// The actual work is done by a BullMQ worker. This table is the
+// persistent state store for the job so users can check progress.
+// ============================================================
+model ImportJob {
+  id        String          @id @default(cuid())
+  userId    String
+
+  platform  Platform
+  status    ImportJobStatus @default(QUEUED)
+
+  // Input provided by user (e.g., session cookie — MUST be encrypted at rest)
+  // We store this temporarily to allow the worker to resume on failure
+  // Cookie is deleted after job completes
+  encryptedCookie  String?
+
+  // Progress tracking
+  totalFound   Int @default(0)  // Total accepted submissions found on platform
+  totalImported Int @default(0) // Successfully saved to our DB
+  totalSkipped  Int @default(0) // Already existed (duplicate)
+  totalFailed   Int @default(0) // Failed to parse or save
+
+  errorMessage String?  // top-level error if job itself failed
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problems     Problem[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status])
+  @@map("import_jobs")
+}
+
+// ============================================================
+// TABLE: DailyStats
+// Pre-aggregated daily statistics per user.
+// Instead of running expensive COUNT queries on revision_logs
+// every time analytics is loaded, we maintain this running total.
+// Updated by a background job at midnight or on each revision event.
+// ============================================================
+model DailyStats {
+  id         String   @id @default(cuid())
+  userId     String
+  date       DateTime @db.Date          // stored as DATE (no time component)
+
+  problemsSolved   Int @default(0)      // new problems imported on this day
+  problemsRevised  Int @default(0)      // revision sessions completed
+  againCount       Int @default(0)
+  hardCount        Int @default(0)
+  goodCount        Int @default(0)
+  easyCount        Int @default(0)
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // Relations
+  user       User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])              // one row per user per day
+  @@index([userId, date(sort: Desc)])
+  @@map("daily_stats")
+}
+
+// ============================================================
+// TABLE: StreakRecord
+// One-to-one with User. Tracks current and longest streak.
+// Separated from User to avoid locking the users table on every
+// revision event.
+// ============================================================
+model StreakRecord {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+
+  currentStreak   Int      @default(0)
+  longestStreak   Int      @default(0)
+  lastActiveDate  DateTime?   // Date of the last day user completed any revision
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  user            User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("streak_records")
+}
