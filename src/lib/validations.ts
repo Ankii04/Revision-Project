@@ -44,7 +44,7 @@ export const CreateProblemSchema = z.object({
   language: LanguageSchema,
   submittedAt: z.coerce.date().optional(),
   importedVia: z
-    .enum(["cookie_import", "extension", "manual"])
+    .enum(["cookie_import", "extension_intercept", "extension", "manual"])
     .optional()
     .default("manual"),
   importJobId: z.string().cuid().optional(),
@@ -61,7 +61,7 @@ export const UpdateProblemSchema = z.object({
 // ─── Problem Query Params ─────────────────────────────────────────────────────
 export const GetProblemsQuerySchema = z.object({
   page: z.coerce.number().int().positive().optional().default(1),
-  limit: z.coerce.number().int().min(1).max(100).optional().default(20),
+  limit: z.coerce.number().int().min(1).max(1000).optional().default(300),
   platform: PlatformSchema.optional(),
   difficulty: DifficultySchema.optional(),
   tag: z.string().optional(),
@@ -76,14 +76,9 @@ export const GetProblemsQuerySchema = z.object({
 
 // ─── Import Schemas ───────────────────────────────────────────────────────────
 export const LeetCodeImportSchema = z.object({
-  sessionCookie: z
-    .string()
-    .min(20)
-    .refine(
-      (val) => val.includes("LEETCODE_SESSION"),
-      "Cookie must include LEETCODE_SESSION token"
-    ),
+  sessionCookie: z.string().min(10),
 });
+
 
 export const GfgImportSchema = z.object({
   sessionCookie: z.string().min(20),

@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "DSA Revision — Auto Capture",
+  "short_name": "DSA Revision",
+  "version": "1.0.0",
+  "description": "Automatically captures your LeetCode & GFG accepted solutions and syncs them to your DSA Revision dashboard.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://leetcode.com/*",
+    "https://www.leetcode.com/*",
+    "https://geeksforgeeks.org/*",
+    "https://www.geeksforgeeks.org/*",
+    "https://practice.geeksforgeeks.org/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://leetcode.com/problems/*",
+        "https://www.leetcode.com/problems/*",
+        "https://practice.geeksforgeeks.org/problems/*",
+        "https://geeksforgeeks.org/problems/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "DSA Revision",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

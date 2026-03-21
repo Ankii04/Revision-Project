@@ -1,4 +1,6 @@
+import "dotenv/config";
 import { Worker } from "bullmq";
+
 import { getRedisConnection } from "@/lib/bullmq-redis";
 import {
   IMPORT_QUEUE_NAME,
@@ -27,6 +29,8 @@ const importWorker = new Worker(
   IMPORT_QUEUE_NAME,
   async (job) => {
     const { jobId } = job.data;
+    console.log(`📦 [JOB RECEIVED] Tracking ID: ${jobId}`);
+
     const importJob = await prisma.importJob.findUnique({
       where: { id: jobId },
     });
@@ -42,18 +46,33 @@ const importWorker = new Worker(
       let totalSkipped = 0;
 
       while (hasMore) {
+        console.log(`🔍 [SCANNING HISTORY] Checking submissions ${offset} to ${offset + 100}...`);
         const { submissions, hasNext } = await fetchLeetCodeSubmissionsPage(
           importJob.encryptedCookie,
           offset
         );
+        
+        if (submissions.length === 0) break;
+
+        console.log(`✅ [FOUND] ${submissions.length} history entries. Filtering for new 'Accepted' unique problems...`);
+
 
         for (const sub of submissions) {
-          // Check for duplicate
-          const existing = await findExistingProblem(
-            importJob.userId,
-            "LEETCODE",
-            sub.id
-          );
+          // 1. ONLY import Accepted submissions
+          if (sub.statusDisplay !== "Accepted") {
+            totalSkipped++;
+            continue;
+          }
+
+          // 2. Check if a problem with this slug already exists for THIS user
+          // This avoids importing multiple Accepted submissions for the same problem
+          const existing = await prisma.problem.findFirst({
+            where: { 
+              userId: importJob.userId,
+              platform: "LEETCODE",
+              slug: sub.titleSlug 
+            }
+          });
 
           if (existing) {
             totalSkipped++;
@@ -80,6 +99,8 @@ const importWorker = new Worker(
             submittedAt: new Date(sub.timestamp * 1000),
             importedVia: "cookie_import",
             importJobId: jobId,
+            companies: [],
+            isPremium: false,
           });
 
           // Queue AI notes for this new problem
@@ -93,9 +114,11 @@ const importWorker = new Worker(
           });
         }
 
-        hasMore = hasNext;
+        hasMore = hasNext && submissions.length > 0;
         offset += submissions.length;
+        console.log(`📊 [PROGRESS] Found ${totalImported} of your 170+ problems so far. (Scanned ${offset} history entries)`);
       }
+
 
       await updateImportJob(jobId, {
         status: "COMPLETED",
@@ -110,7 +133,7 @@ const importWorker = new Worker(
       throw error;
     }
   },
-  { connection }
+  { connection: connection as any }
 );
 
 // ─── AI Notes Worker ────────────────────────────────────────────────────────
@@ -122,9 +145,16 @@ const aiNotesWorker = new Worker(
   AI_NOTES_QUEUE_NAME,
   async (job) => {
     const { problemId } = job.data;
-    await generateAiNotes(problemId);
+    console.log(`🧠 [AI JOB RECEIVED] Problem ID: ${problemId}`);
+    try {
+      await generateAiNotes(problemId);
+      console.log(`✅ [AI JOB DONE] Problem ID: ${problemId}`);
+    } catch (error) {
+      console.error(`❌ [AI JOB FAILED] Problem ID: ${problemId}`, error);
+      throw error;
+    }
   },
-  { connection, concurrency: 2 } // Limit concurrent Claude API calls
+  { connection: connection as any, concurrency: 2 } // Limit concurrent Gemini API calls
 );
 
 console.log("🚀 Workers started and listening for jobs...");

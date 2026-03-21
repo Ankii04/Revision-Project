@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { prisma } from "@/lib/prisma";
 import type { AiNotes } from "@prisma/client";
 
@@ -18,20 +18,20 @@ export interface AiNotesContent {
 
 // ─── Client ────────────────────────────────────────────────────────────────
 
-/** Lazily-initialized Anthropic client */
-function getAnthropicClient(): Anthropic {
-  const apiKey = process.env["ANTHROPIC_API_KEY"];
+/** Lazily-initialized Gemini client */
+function getGeminiModel() {
+  const apiKey = process.env["GOOGLE_GEMINI_API_KEY"];
   if (!apiKey) {
-    throw new Error("ANTHROPIC_API_KEY must be set in .env.local");
+    throw new Error("GOOGLE_GEMINI_API_KEY must be set in .env");
   }
-  return new Anthropic({ apiKey });
+  const genAI = new GoogleGenerativeAI(apiKey);
+  return genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 }
 
 // ─── Prompt Builder ────────────────────────────────────────────────────────
 
 /**
- * Builds the structured prompt that Claude uses to generate DSA problem notes.
- * The prompt asks Claude for JSON output to enable reliable parsing.
+ * Builds the structured prompt for Gemini to generate DSA problem notes.
  */
 function buildPrompt(params: {
   title: string;
@@ -52,20 +52,28 @@ User's Solution:
 ${params.solutionCode}
 \`\`\`
 
-Generate comprehensive revision notes for this problem. Return ONLY valid JSON with this exact structure:
+Generate comprehensive revision notes for this problem. You MUST provide exactly three approaches if possible: Brute Force, Better, and Optimal (Best). 
+
+Return ONLY valid JSON with this exact structure:
 
 {
   "keyInsight": "The single most important 'aha' moment that unlocks this problem. Be specific and concise (1-2 sentences).",
   "approaches": [
     {
       "name": "Brute Force",
-      "description": "Detailed explanation of the naive approach and why it works but is suboptimal",
+      "description": "Explanation of the naive approach and why it's suboptimal",
       "timeComplexity": "O(...)",
       "spaceComplexity": "O(...)"
     },
     {
-      "name": "Optimal",
-      "description": "Explanation of the optimal approach (matching the user's solution), why it works, and the key data structure/pattern used",
+      "name": "Better",
+      "description": "An intermediate optimization (e.g., using a Map or sorting) that isn't yet perfect",
+      "timeComplexity": "O(...)",
+      "spaceComplexity": "O(...)"
+    },
+    {
+      "name": "Optimal (Best)",
+      "description": "Detailed explanation of the absolute best approach (matching or improving the user's solution)",
       "timeComplexity": "O(...)",
       "spaceComplexity": "O(...)"
     }
@@ -73,24 +81,20 @@ Generate comprehensive revision notes for this problem. Return ONLY valid JSON w
 }
 
 Rules:
-- Include a "Better Approach" entry between Brute Force and Optimal if an intermediate optimization exists
-- The Optimal approach should match or explain the user's actual solution
-- Keep descriptions clear enough that the user will understand them 6 months from now
-- Be specific about WHY each complexity is what it is
-- Return ONLY the JSON object, no markdown fences, no extra text`;
+- If a "Better" approach isn't applicable, still provide 3 entries by breaking down the logic or using an alternative equivalent optimal strategy.
+- Be specific about WHY each complexity is what it is.
+- Return ONLY the JSON object. No markdown code blocks, no preamble, no tail.`;
 }
 
 // ─── Service ───────────────────────────────────────────────────────────────
 
 /**
  * Returns the current AI notes for a problem.
- * If no notes record exists, returns null.
  */
 export async function getAiNotes(
   problemId: string,
   userId: string
 ): Promise<AiNotes | null> {
-  // Verify the problem belongs to the user
   const problem = await prisma.problem.findFirst({
     where: { id: problemId, userId },
   });
@@ -100,9 +104,7 @@ export async function getAiNotes(
 }
 
 /**
- * Enqueues an AI notes generation job for a problem.
- * Creates an AiNotes record in PENDING state if one doesn't exist.
- * Rate-limits to 3 regenerations per problem per day.
+ * Enqueues an AI notes generation job.
  */
 export async function queueAiNotesGeneration(
   problemId: string,
@@ -111,62 +113,48 @@ export async function queueAiNotesGeneration(
   const problem = await prisma.problem.findFirst({
     where: { id: problemId, userId },
   });
-  if (!problem) {
-    throw new Error("Problem not found.");
-  }
+  if (!problem) throw new Error("Problem not found.");
 
   const existing = await prisma.aiNotes.findUnique({ where: { problemId } });
 
-  // Rate limit check for regeneration (3x per day)
-  if (existing && existing.regenerateCount > 0) {
+  // Rate limit check
+  if (existing && existing.regenerateCount >= 10) {
     const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    if (
-      existing.lastRegeneratedAt &&
-      existing.lastRegeneratedAt > dayAgo &&
-      existing.regenerateCount >= 3
-    ) {
-      const retryAfter = new Date(existing.lastRegeneratedAt.getTime() + 24 * 60 * 60 * 1000);
-      return { status: "rate_limited", message: "Rate limit reached", retryAfter };
+    if (existing.lastRegeneratedAt && existing.lastRegeneratedAt > dayAgo) {
+        return { status: "rate_limited", message: "Daily limit reached" };
     }
   }
 
-  // Upsert the AI notes record to PENDING state
   await prisma.aiNotes.upsert({
     where: { problemId },
     create: { problemId, status: "PENDING" },
     update: {
       status: "PENDING",
-      content: undefined,
       errorMessage: null,
-      regenerateCount: { increment: existing ? 1 : 0 },
-      lastRegeneratedAt: existing ? new Date() : undefined,
+      regenerateCount: { increment: 1 },
+      lastRegeneratedAt: new Date(),
     },
   });
 
-  return {
-    status: "queued",
-    message: "Notes are being generated. This typically takes 15–30 seconds.",
-  };
+  return { status: "queued", message: "Generating notes with Gemini..." };
 }
 
 /**
  * The core AI generation function — called by the BullMQ worker.
- * Calls Claude, parses the response, and saves to the database.
- * This is NOT called directly from an API route — only from the worker.
  */
 export async function generateAiNotes(problemId: string): Promise<void> {
-  // Mark as processing to prevent duplicate worker pickup
-  await prisma.aiNotes.update({
+  console.log(`🤖 [GEMINI START] Processing problem: ${problemId}`);
+  // Use upsert so we can handle cases where the AI notes record doesn't exist yet
+  await prisma.aiNotes.upsert({
     where: { problemId },
-    data: { status: "PROCESSING" },
+    create: { problemId, status: "PROCESSING" },
+    update: { status: "PROCESSING" },
   });
+
 
   const problem = await prisma.problem.findUnique({ where: { id: problemId } });
   if (!problem) {
-    await prisma.aiNotes.update({
-      where: { problemId },
-      data: { status: "FAILED", errorMessage: "Problem not found during generation." },
-    });
+    console.error(`❌ [GEMINI ERROR] Problem ${problemId} not found.`);
     return;
   }
 
@@ -179,35 +167,24 @@ export async function generateAiNotes(problemId: string): Promise<void> {
   });
 
   try {
-    const client = getAnthropicClient();
-    const MODEL = "claude-sonnet-4-20250514";
+    const model = getGeminiModel();
+    console.log(`📡 [GEMINI FETCH] Calling Google API for: ${problem.title}...`);
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text().trim();
+    console.log(`✅ [GEMINI RESPONSE] Content received for: ${problem.title}`);
 
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 2048,
-      messages: [{ role: "user", content: prompt }],
-    });
-
-    // Extract text content from Claude's response
-    const textBlock = response.content.find((block) => block.type === "text");
-    if (!textBlock || textBlock.type !== "text") {
-      throw new Error("Claude returned no text content.");
-    }
-
-    // Parse and validate the JSON response
-    const parsed: AiNotesContent = JSON.parse(textBlock.text) as AiNotesContent;
-
-    if (!parsed.keyInsight || !Array.isArray(parsed.approaches)) {
-      throw new Error("Claude response did not match expected JSON structure.");
-    }
+    // Clean potential markdown blocks if Gemini formats them anyway
+    const jsonStr = responseText.replace(/^```json/, "").replace(/```$/, "").trim();
+    const parsed: AiNotesContent = JSON.parse(jsonStr) as AiNotesContent;
+    console.log(`🔍 [GEMINI PARSED] Successfully parsed JSON structure.`);
 
     await prisma.aiNotes.update({
       where: { problemId },
       data: {
         status: "DONE",
-        content: parsed,
+        content: parsed as any,
         promptUsed: prompt,
-        modelVersion: MODEL,
+        modelVersion: "gemini-1.5-flash",
         errorMessage: null,
       },
     });
@@ -217,6 +194,6 @@ export async function generateAiNotes(problemId: string): Promise<void> {
       where: { problemId },
       data: { status: "FAILED", errorMessage: message },
     });
-    throw error; // Re-throw so BullMQ can retry
+    throw error;
   }
 }

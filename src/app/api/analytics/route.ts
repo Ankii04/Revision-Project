@@ -26,8 +26,8 @@ export const GET = withErrorHandler(async (req) => {
   const limitStr = searchParams.get("limit");
   const type = searchParams.get("type");
 
-  if (yearStr && type === "heatmap") {
-    const { year } = HeatmapQuerySchema.parse({ year: yearStr });
+  if (type === "heatmap") {
+    const { year } = HeatmapQuerySchema.parse({ year: yearStr ?? new Date().getFullYear().toString() });
     const data = await getHeatmapData(userId, year);
     return apiSuccess(data);
   }

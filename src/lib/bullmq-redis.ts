@@ -15,9 +15,11 @@ export function getRedisConnection(): Redis {
   }
 
   redisConnection = new Redis(redisUrl, {
-    maxRetriesPerRequest: null, // Critical requirement for BullMQ
+    maxRetriesPerRequest: null,
+    tls: redisUrl.startsWith("rediss://") ? {} : undefined,
     retryStrategy: (times) => Math.min(times * 50, 2000),
   });
+
 
   return redisConnection;
 }

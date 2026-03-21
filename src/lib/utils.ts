@@ -6,41 +6,57 @@ export function cn(...inputs: ClassValue[]): string {
   return twMerge(clsx(inputs));
 }
 
-/** Formats a date as "Mar 20, 2026" */
-export function formatDate(date: Date | string): string {
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(new Date(date));
+/** Formats a date safely as "Mar 20, 2026" */
+export function formatDate(date?: Date | string | null): string {
+  if (!date) return "N/A";
+  try {
+    const d = new Date(date);
+    if (isNaN(d.getTime())) return "N/A";
+    return new Intl.DateTimeFormat("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }).format(d);
+  } catch {
+    return "N/A";
+  }
 }
 
-/** Returns the relative time from now, e.g. "3 days ago" */
-export function formatRelativeTime(date: Date | string): string {
-  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-  const diffMs = new Date(date).getTime() - Date.now();
-  const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+/** Returns the relative time safely from now, e.g. "3 days ago" */
+export function formatRelativeTime(date?: Date | string | null): string {
+  if (!date) return "Just now";
+  
+  try {
+    const d = new Date(date);
+    const ms = d.getTime();
+    if (isNaN(ms)) return "Just now";
 
-  if (Math.abs(diffDays) < 1) {
-    const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-    if (Math.abs(diffHours) < 1) {
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      return rtf.format(diffMinutes, "minute");
-    }
-    return rtf.format(diffHours, "hour");
+    const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+    const diffMs = ms - Date.now();
+    
+    // Convert to units
+    const diffMin = Math.round(diffMs / (1000 * 60));
+    const diffHr = Math.round(diffMs / (1000 * 60 * 60));
+    const diffDay = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+    if (Math.abs(diffMin) < 60) return rtf.format(diffMin, "minute");
+    if (Math.abs(diffHr) < 24) return rtf.format(diffHr, "hour");
+    return rtf.format(diffDay, "day");
+  } catch {
+    return "Just now";
   }
-  return rtf.format(diffDays, "day");
 }
 
 /** Truncates a string to a max length with an ellipsis */
 export function truncate(str: string, maxLength: number): string {
+  if (!str) return "";
   if (str.length <= maxLength) return str;
   return str.slice(0, maxLength - 3) + "...";
 }
 
 /** Maps a difficulty string to a color class */
 export function difficultyColor(
-  difficulty: "EASY" | "MEDIUM" | "HARD" | "UNKNOWN"
+  difficulty?: "EASY" | "MEDIUM" | "HARD" | "UNKNOWN"
 ): string {
   switch (difficulty) {
     case "EASY":
@@ -67,5 +83,7 @@ export function ratingToQuality(
       return 4;
     case "EASY":
       return 5;
+    default:
+      return 3;
   }
 }

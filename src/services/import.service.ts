@@ -107,13 +107,13 @@ export async function updateImportJob(
 export async function fetchLeetCodeSubmissionsPage(
   sessionCookie: string,
   offset: number,
-  limit = 20
+  limit = 100
 ): Promise<{ submissions: LeetCodeSubmission[]; hasNext: boolean }> {
   const GRAPHQL_URL = "https://leetcode.com/graphql/";
 
   const query = `
-    query submissionList($offset: Int!, $limit: Int!, $lastKey: String, $questionSlug: String, $lang: Int, $status: Int) {
-      submissionList(offset: $offset, limit: $limit, lastKey: $lastKey, questionSlug: $questionSlug, lang: $lang, status: $status) {
+    query submissionList($offset: Int!, $limit: Int!, $lastKey: String, $questionSlug: String) {
+      submissionList(offset: $offset, limit: $limit, lastKey: $lastKey, questionSlug: $questionSlug) {
         lastKey
         hasNext
         submissions {
@@ -129,22 +129,31 @@ export async function fetchLeetCodeSubmissionsPage(
     }
   `;
 
+  // Automatically wrap raw session values if they don't have the LEETCODE_SESSION key
+  const cookieHeader = sessionCookie.includes("LEETCODE_SESSION") 
+    ? sessionCookie 
+    : `LEETCODE_SESSION=${sessionCookie}; csrftoken=dummy`;
+
   const response = await fetch(GRAPHQL_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Cookie: sessionCookie,
+      Cookie: cookieHeader,
       Referer: "https://leetcode.com",
-      "x-csrftoken": extractCsrfToken(sessionCookie),
+      "x-csrftoken": extractCsrfToken(cookieHeader) || "dummy",
     },
     body: JSON.stringify({
       query,
-      variables: { offset, limit, status: 10 }, // status 10 = Accepted
+      variables: { offset, limit },
     }),
   });
 
+
+
   if (!response.ok) {
-    throw new Error(`LeetCode API returned ${response.status}`);
+    const errorBody = await response.text();
+    console.error(`❌ LeetCode API Error (${response.status}):`, errorBody);
+    throw new Error(`LeetCode API returned ${response.status}: ${errorBody}`);
   }
 
   const data = (await response.json()) as {
@@ -171,7 +180,7 @@ export async function fetchLeetCodeSubmissionsPage(
 
   return {
     hasNext: submissionList.hasNext,
-    submissions: submissionList.submissions.map((s) => ({
+    submissions: (submissionList.submissions || []).map((s) => ({
       ...s,
       timestamp: parseInt(s.timestamp),
       code: "", // code fetched separately
@@ -179,6 +188,7 @@ export async function fetchLeetCodeSubmissionsPage(
       topicTags: [],
     })),
   };
+
 }
 
 /**
@@ -203,13 +213,18 @@ export async function fetchSubmissionDetail(
     }
   `;
 
+  // Normalize the cookie the same way fetchLeetCodeSubmissionsPage does
+  const cookieHeader = sessionCookie.includes("LEETCODE_SESSION")
+    ? sessionCookie
+    : `LEETCODE_SESSION=${sessionCookie}; csrftoken=dummy`;
+
   const response = await fetch(GRAPHQL_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Cookie: sessionCookie,
+      Cookie: cookieHeader,
       Referer: "https://leetcode.com",
-      "x-csrftoken": extractCsrfToken(sessionCookie),
+      "x-csrftoken": extractCsrfToken(cookieHeader) || "dummy",
     },
     body: JSON.stringify({
       query,
@@ -255,6 +270,12 @@ export function mapLeetCodeLanguage(lcLang: string): string {
 
 /** Extracts the CSRF token from a LeetCode session cookie string */
 function extractCsrfToken(cookie: string): string {
+  // Try finding it in the cookie string
   const match = /csrftoken=([^;]+)/.exec(cookie);
-  return match?.[1] ?? "";
+  if (match?.[1]) return match[1];
+  
+  // If not found, try common patterns or return a placeholder
+  // Most modern LC installs require this.
+  return "";
 }
+

@@ -160,6 +160,27 @@ export async function createProblem(
       },
     });
 
+    // 4. Update DailyStats for the heatmap
+    const solveDate = input.submittedAt ? new Date(input.submittedAt) : new Date();
+    solveDate.setHours(0, 0, 0, 0); // Normalize to midnight for daily aggregation
+
+    await tx.dailyStats.upsert({
+      where: {
+        userId_date: {
+          userId,
+          date: solveDate,
+        },
+      },
+      create: {
+        userId,
+        date: solveDate,
+        problemsSolved: 1,
+      },
+      update: {
+        problemsSolved: { increment: 1 },
+      },
+    });
+
     return problem;
   });
 }
