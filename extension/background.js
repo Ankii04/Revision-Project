@@ -7,6 +7,8 @@
  *  - Auth token management via chrome.storage
  */
 
+// 🚀 PRODUCTION: Change this to your Vercel URL before distributing the extension
+// e.g. "https://your-revision-app.vercel.app"
 const DEFAULT_WEBSITE_URL = "http://localhost:3000";
 
 // ── Install / Update ─────────────────────────────────────────────────────────

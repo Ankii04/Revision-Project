@@ -1,24 +1,44 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Search, Filter, ExternalLink, Calendar, Code2 } from "lucide-react";
 import Link from "next/link";
+import { useEffect } from "react";
 import { motion } from "framer-motion";
 
 /**
  * Problems List: Shows all captured/imported problems for the user.
  */
 export default function ProblemsPage() {
+  const queryClient = useQueryClient();
+  
   const { data: problems, isLoading } = useQuery({
     queryKey: ["problems-list"],
     queryFn: async () => {
-      const res = await fetch("/api/problems");
+      const res = await fetch("/api/problems?limit=250"); // Fetch more to show all 170+ problems
       const data = await res.json();
       return data.data.problems;
     },
+    staleTime: 5 * 60 * 1000,
   });
+
+  // Prefetch first few detail pages
+  useEffect(() => {
+    if (problems) {
+      problems.slice(0, 5).forEach((p: any) => {
+        queryClient.prefetchQuery({
+          queryKey: ["problem-detail", p.id],
+          queryFn: async () => {
+            const res = await fetch(`/api/problems/${p.id}`);
+            return (await res.json()).data;
+          },
+        });
+      });
+    }
+  }, [problems, queryClient]);
+
 
   return (
     <div className="p-8 space-y-8">
@@ -57,7 +77,7 @@ export default function ProblemsPage() {
               key={problem.id}
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: index * 0.05 }}
+              transition={{ delay: Math.min(index * 0.04, 0.3) }}
               className="bg-card border rounded-2xl p-5 hover:border-primary/50 transition-all group flex flex-col md:flex-row md:items-center justify-between gap-6"
             >
               <div className="flex items-start gap-4 flex-1">

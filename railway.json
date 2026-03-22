@@ -6,10 +6,7 @@
   "deploy": {
     "numReplicas": 1,
     "sleepApplication": false,
-    "restartPolicyType": "ON_FAILURE"
-  },
-  "service": {
-    "name": "dsa-revision-worker",
-    "command": "npm run worker:dev"
+    "restartPolicyType": "ON_FAILURE",
+    "startCommand": "npx tsx src/workers/index.ts"
   }
 }

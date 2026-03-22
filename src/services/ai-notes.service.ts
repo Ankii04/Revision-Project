@@ -12,6 +12,7 @@ export interface ApproachNote {
 }
 
 export interface AiNotesContent {
+  problemDescription: string;
   keyInsight: string;
   approaches: ApproachNote[];
 }
@@ -25,7 +26,7 @@ function getGeminiModel() {
     throw new Error("GOOGLE_GEMINI_API_KEY must be set in .env");
   }
   const genAI = new GoogleGenerativeAI(apiKey);
-  return genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  return genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 }
 
 // ─── Prompt Builder ────────────────────────────────────────────────────────
@@ -40,50 +41,26 @@ function buildPrompt(params: {
   language: string;
   solutionCode: string;
 }): string {
-  return `You are an expert competitive programmer and CS educator analyzing a solved DSA problem.
+  return `Analyze this solved DSA problem. Provide a study note to help me recall the logic later.
 
-Problem: ${params.title}
-Difficulty: ${params.difficulty}
-Topics: ${params.tags.join(", ")}
-Language: ${params.language}
-
-User's Solution:
-\`\`\`${params.language.toLowerCase()}
+PROBLEM: ${params.title}
+DIFFICULTY: ${params.difficulty}
+TAGS: ${params.tags.join(", ")}
+LANGUAGE: ${params.language}
+SOLUTION CODE:
 ${params.solutionCode}
-\`\`\`
-
-Generate comprehensive revision notes for this problem. You MUST provide exactly three approaches if possible: Brute Force, Better, and Optimal (Best). 
 
 Return ONLY valid JSON with this exact structure:
-
 {
-  "keyInsight": "The single most important 'aha' moment that unlocks this problem. Be specific and concise (1-2 sentences).",
+  "problemDescription": "A 2-3 sentence summary of the problem goal and core constraints (reconstructed from title and code logic).",
+  "keyInsight": "The single most critical 'aha' moment for an optimal solution.",
   "approaches": [
-    {
-      "name": "Brute Force",
-      "description": "Explanation of the naive approach and why it's suboptimal",
-      "timeComplexity": "O(...)",
-      "spaceComplexity": "O(...)"
-    },
-    {
-      "name": "Better",
-      "description": "An intermediate optimization (e.g., using a Map or sorting) that isn't yet perfect",
-      "timeComplexity": "O(...)",
-      "spaceComplexity": "O(...)"
-    },
-    {
-      "name": "Optimal (Best)",
-      "description": "Detailed explanation of the absolute best approach (matching or improving the user's solution)",
-      "timeComplexity": "O(...)",
-      "spaceComplexity": "O(...)"
-    }
+    { "name": "Brute Force", "description": "Naive approach summary.", "timeComplexity": "O(...)", "spaceComplexity": "O(...)" },
+    { "name": "Optimal", "description": "The best optimized approach logic.", "timeComplexity": "O(...)", "spaceComplexity": "O(...)" }
   ]
 }
 
-Rules:
-- If a "Better" approach isn't applicable, still provide 3 entries by breaking down the logic or using an alternative equivalent optimal strategy.
-- Be specific about WHY each complexity is what it is.
-- Return ONLY the JSON object. No markdown code blocks, no preamble, no tail.`;
+No markdown code blocks. NO preamble. JSON only.`;
 }
 
 // ─── Service ───────────────────────────────────────────────────────────────

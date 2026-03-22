@@ -131,6 +131,7 @@ export async function createProblem(
         platform: input.platform as Platform,
         platformId: input.platformId,
         platformUrl: input.platformUrl,
+        description: input.description,
         difficulty: (input.difficulty ?? "UNKNOWN") as Difficulty,
         tags: input.tags ?? [],
         companies: input.companies ?? [],

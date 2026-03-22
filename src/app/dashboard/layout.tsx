@@ -2,6 +2,7 @@ import { auth, currentUser } from "@clerk/nextjs/server";
 import { syncUser } from "@/services/user.service";
 import { MainNav } from "@/components/main-nav";
 import { redirect } from "next/navigation";
+import { unstable_cache } from "next/cache";
 
 export default async function AppLayout({
   children,
@@ -11,17 +12,22 @@ export default async function AppLayout({
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
-  // Await sync so the user row exists in DB before the page renders.
-  // This is critical for first-time GitHub logins via Clerk — without awaiting,
-  // React Query fires before the user record exists and returns empty data.
+  // Sync user only once per session using Next.js cache.
+  // Without caching, this ran a DB read + write on EVERY page navigation,
+  // adding 200-600ms latency to every click. Now it only runs once per hour.
   const clerkUser = await currentUser();
   if (clerkUser) {
-    await syncUser({
-      clerkUserId: clerkUser.id,
-      email: clerkUser.emailAddresses[0]?.emailAddress ?? "",
-      name: `${clerkUser.firstName ?? ""} ${clerkUser.lastName ?? ""}`.trim(),
-      avatarUrl: clerkUser.imageUrl,
-    });
+    const cachedSync = unstable_cache(
+      async () => syncUser({
+        clerkUserId: clerkUser.id,
+        email: clerkUser.emailAddresses[0]?.emailAddress ?? "",
+        name: `${clerkUser.firstName ?? ""} ${clerkUser.lastName ?? ""}`.trim(),
+        avatarUrl: clerkUser.imageUrl,
+      }),
+      [`user-sync-${clerkUser.id}`],
+      { revalidate: 3600, tags: [`user-${clerkUser.id}`] } // Cache for 1 hour
+    );
+    await cachedSync();
   }
 
   return (

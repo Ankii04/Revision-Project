@@ -22,8 +22,28 @@ export const GET = withErrorHandler(async () => {
   // Get or create today's quiz session
   let session = await prisma.quizSession.findFirst({
     where: { userId, date: today },
-    include: { items: { include: { problem: { select: { id: true, title: true, difficulty: true, tags: true, solutionCode: true, language: true, platform: true, platformUrl: true } } } } },
+    include: {
+      items: {
+        include: {
+          problem: {
+            select: {
+              id: true,
+              title: true,
+              difficulty: true,
+              tags: true,
+              solutionCode: true,
+              language: true,
+              platform: true,
+              platformUrl: true,
+              description: true,
+              aiNotes: true,
+            },
+          },
+        },
+      },
+    },
   });
+
 
   if (!session) {
     // Build a new session for today

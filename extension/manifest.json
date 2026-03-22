@@ -14,7 +14,9 @@
     "https://www.leetcode.com/*",
     "https://geeksforgeeks.org/*",
     "https://www.geeksforgeeks.org/*",
-    "https://practice.geeksforgeeks.org/*"
+    "https://practice.geeksforgeeks.org/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "background.js",

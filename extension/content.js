@@ -39,7 +39,7 @@ function normalizeLanguage(raw = "") {
 
 // ── Code Extraction ───────────────────────────────────────────────────────────
 function extractCode() {
-  // LeetCode Monaco editor — each "view-line" is one code line
+  // 1. Try LeetCode Monaco editor - active lines
   const monacoLines = document.querySelectorAll(".view-line");
   if (monacoLines.length > 0) {
     return Array.from(monacoLines)
@@ -48,11 +48,13 @@ function extractCode() {
       .trim();
   }
 
-  // LeetCode fallback: the full Monaco container
-  const monacoEditor = document.querySelector(".monaco-editor");
-  if (monacoEditor) return monacoEditor.textContent?.trim() ?? "";
+  // 2. Try LeetCode Submission - static code block
+  const submissionCode = document.querySelector(".monaco-editor .view-lines")
+    ?? document.querySelector("pre[class*='language-']")
+    ?? document.querySelector(".monaco-editor");
+  if (submissionCode) return (submissionCode.innerText || submissionCode.textContent || "").trim();
 
-  // GFG CodeMirror
+  // 3. Try GFG CodeMirror
   const codeMirror = document.querySelector(".CodeMirror")?.querySelector(".CodeMirror-code");
   if (codeMirror) {
     return Array.from(codeMirror.querySelectorAll(".CodeMirror-line"))
@@ -61,24 +63,45 @@ function extractCode() {
       .trim();
   }
 
-  return "// Code could not be captured automatically";
+  // 4. Try generic <pre> fallback
+  const genericPre = document.querySelector("pre code") ?? document.querySelector("pre");
+  if (genericPre) return (genericPre.innerText || genericPre.textContent || "").trim();
+
+  return "// Code could not be captured automatically. Please copy-paste it into the dashboard.";
 }
 
 // ── Title & Slug Extraction ───────────────────────────────────────────────────
 function extractTitle() {
-  // LeetCode
-  const lcTitle = document.querySelector('[data-cy="question-title"]')
-    ?? document.querySelector(".question-title")
-    ?? document.querySelector("h4")
-    ?? document.querySelector('[class*="title"]');
-  if (lcTitle) return (lcTitle.textContent ?? "").trim();
+  // 1. Try specific LeetCode selectors (Old and New UI)
+  const selectors = [
+    '[data-cy="question-title"]',
+    '.question-title',
+    'div[class*="title"]',
+    'h4',
+    '.css-v3d350', // New UI title class
+    '[data-path="/problems/"]' // Breadcrumb-ish
+  ];
 
-  // GFG
-  const gfgTitle = document.querySelector(".problem-statement h2")
-    ?? document.querySelector(".problems_header_content h3");
-  if (gfgTitle) return (gfgTitle.textContent ?? "").trim();
+  for (const selector of selectors) {
+    const el = document.querySelector(selector);
+    const text = el?.textContent?.trim();
+    if (text && text.length > 2) return text;
+  }
 
-  return document.title.split(" - ")[0].trim();
+  // 2. Try GFG selectors
+  const gfgSelectors = [".problem-statement h2", ".problems_header_content h3"];
+  for (const selector of gfgSelectors) {
+    const el = document.querySelector(selector);
+    if (el?.textContent?.trim()) return el.textContent.trim();
+  }
+
+  // 3. Fallback to document.title (usually "Problem Name - LeetCode")
+  let title = document.title.split(" - ")[0].split(" | ")[0].trim();
+  if (title && title !== "LeetCode" && title !== "GeeksforGeeks") return title;
+
+  // 4. Absolute fallback: Humanize the slug
+  const slug = extractSlug();
+  return slug.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
 function extractSlug() {
@@ -87,6 +110,20 @@ function extractSlug() {
   const idx = parts.indexOf("problems");
   if (idx !== -1 && parts[idx + 1]) return parts[idx + 1];
   return parts[parts.length - 1] ?? "unknown-problem";
+}
+
+function extractDescription() {
+  if (PLATFORM === "LEETCODE") {
+    const meta = document.querySelector('[data-track-load="description_content"]')
+      || document.querySelector(".content__u49b")
+      || document.querySelector(".question-content");
+    return meta ? meta.innerHTML : "";
+  }
+  if (PLATFORM === "GFG") {
+    const gfgMeta = document.querySelector(".problem-statement");
+    return gfgMeta ? gfgMeta.innerHTML : "";
+  }
+  return "";
 }
 
 // ── Language Detection ────────────────────────────────────────────────────────
@@ -192,6 +229,7 @@ async function captureSubmission() {
     platformUrl: window.location.href.split("?")[0],
     solutionCode: solutionCode || "// Code not captured",
     language,
+    description: extractDescription(),
     difficulty: "UNKNOWN",
     tags: [],
     companies: [],

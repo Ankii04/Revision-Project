@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
+import Editor from "@monaco-editor/react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
@@ -12,20 +13,23 @@ import {
   XCircle,
   Trophy,
   ArrowLeft,
-  Upload,
-  Shuffle,
-  Target,
-  TrendingUp,
-  Flame,
-  AlertTriangle,
+  Code2,
+  Lock,
   ChevronRight,
-  RotateCcw,
-  Eye,
-  EyeOff,
+  TrendingUp,
+  AlertTriangle,
+  Lightbulb,
+  FileText,
+  MessageSquare,
+  History,
+  Info,
+  ExternalLink,
+  Target,
   Loader2,
 } from "lucide-react";
 import Link from "next/link";
 import { toast } from "@/components/ui/use-toast";
+import { cn } from "@/lib/utils";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -38,6 +42,11 @@ interface QuizProblem {
   language: string;
   platform: string;
   platformUrl?: string | null;
+  description?: string | null;
+  aiNotes?: {
+    content: any;
+    status: string;
+  } | null;
 }
 
 interface QuizItem {
@@ -73,26 +82,19 @@ interface QuizState {
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const DIFFICULTY_COLORS = {
-  EASY: "bg-green-500/10 text-green-400 border-green-500/20",
-  MEDIUM: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
-  HARD: "bg-red-500/10 text-red-400 border-red-500/20",
-  UNKNOWN: "bg-muted text-muted-foreground border-border",
+  EASY: "text-green-500",
+  MEDIUM: "text-yellow-500",
+  HARD: "text-red-500",
+  UNKNOWN: "text-slate-500",
 };
 
 // ── Main Component ─────────────────────────────────────────────────────────────
 
-/**
- * RevisionQuiz — the new smart quiz system with:
- *  - Daily quota (starts at 5, adaptive increase on passing)
- *  - Random shuffle within session
- *  - Full pool rotation (no question is ever permanently skipped)
- *  - Wrong-answer re-queue
- *  - Session summary with score, streaks, pool stats
- */
 export default function RevisionQuiz() {
   const queryClient = useQueryClient();
-  const [currentItemIndex, setCurrentItemIndex] = useState(0);
-  const [revealed, setRevealed] = useState(false);
+  const [activeItemIndex, setActiveItemIndex] = useState(0);
+  const [codeAttempt, setCodeAttempt] = useState<Record<string, string>>({});
+  const [contentTab, setContentTab] = useState<"description" | "solution">("description");
   const [sessionResult, setSessionResult] = useState<{
     completed: boolean;
     passed: boolean;
@@ -107,614 +109,325 @@ export default function RevisionQuiz() {
       if (!res.ok) throw new Error("Failed to load quiz session");
       return (await res.json()).data;
     },
-    staleTime: 0,
+    staleTime: 5 * 60 * 1000,
   });
 
   // Submit answer mutation
   const answerMutation = useMutation({
-    mutationFn: async ({
-      itemId,
-      correct,
-    }: {
-      itemId: string;
-      correct: boolean;
-    }) => {
+    mutationFn: async ({ itemId, correct }: { itemId: string; correct: boolean }) => {
       const res = await fetch("/api/revision/quiz-state", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ itemId, correct }),
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err?.error?.message ?? "Failed to submit answer");
-      }
-      return await res.json();
+      if (!res.ok) throw new Error("Submission Failed");
+      return (await res.json()).data;
     },
-    onSuccess: (result) => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["quiz-state"] });
-      queryClient.invalidateQueries({ queryKey: ["analytics-overview"] });
-
-      const data = result.data;
       if (data?.completed) {
-        setSessionResult({
-          completed: true,
-          passed: data.passed,
-          nextQuota: data.nextQuota,
-        });
+        setSessionResult({ completed: true, passed: data.passed, nextQuota: data.nextQuota });
       } else {
-        // Move to next unanswered item
-        moveToNext();
+        // Auto-switch to next unanswered
+        const items = queryClient.getQueryData<QuizState>(["quiz-state"])?.session?.items || [];
+        const nextIdx = items.findIndex((i, idx) => !i.answered && idx > activeItemIndex);
+        const finalNext = nextIdx !== -1 ? nextIdx : items.findIndex(i => !i.answered);
+        if (finalNext !== -1) setActiveItemIndex(finalNext);
       }
-    },
-    onError: (err: Error) => {
-      toast({
-        title: "Failed to submit",
-        description: err.message,
-        variant: "destructive",
-      });
     },
   });
 
-  function moveToNext() {
-    setRevealed(false);
-    setCurrentItemIndex((prev) => prev + 1);
-  }
+  const session = data?.session;
+  const items = session?.items || [];
+  const currentItem = items[activeItemIndex];
+  const currentProblem = currentItem?.problem;
+  const progressPercent = items.length > 0 ? (items.filter(i => i.answered).length / items.length) * 100 : 0;
 
-  // ── Loading ────────────────────────────────────────────────────────────────
-  if (isLoading) {
+  if (isLoading) return <div className="h-screen bg-slate-950 flex items-center justify-center"><p className="font-black italic text-primary animate-pulse tracking-widest">BOOTING INTERFACE...</p></div>;
+  if (error || !data) return <div className="h-screen bg-slate-950 flex items-center justify-center p-8 text-center"><p className="text-red-500 font-bold uppercase tracking-widest">Failed to initialize session sync.</p></div>;
+
+  if (sessionResult?.completed || (session?.completed && !sessionResult)) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-5">
-          <div className="relative">
-            <div className="h-16 w-16 rounded-2xl bg-primary/10 flex items-center justify-center">
-              <Brain className="h-8 w-8 text-primary animate-pulse" />
-            </div>
-            <div className="absolute inset-0 rounded-2xl bg-primary/20 animate-ping" />
-          </div>
-          <div className="text-center space-y-1">
-            <p className="font-black italic uppercase tracking-widest text-sm text-primary">
-              BUILDING YOUR SESSION
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Selecting & shuffling today's questions…
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // ── Error ──────────────────────────────────────────────────────────────────
-  if (error || !data) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background p-6">
-        <div className="text-center space-y-4 max-w-sm">
-          <AlertTriangle className="h-12 w-12 text-red-500 mx-auto opacity-60" />
-          <h2 className="text-xl font-black italic uppercase">
-            Couldn't Load Session
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            {(error as Error)?.message ?? "Unknown error"}
-          </p>
-          <Button onClick={() => queryClient.invalidateQueries({ queryKey: ["quiz-state"] })}>
-            RETRY
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
-  const { session, pool } = data;
-  const items = session.items;
-  const unansweredItems = items.filter((i) => !i.answered);
-  const answeredItems = items.filter((i) => i.answered);
-  const progressPercent = (answeredItems.length / items.length) * 100;
-
-  // ── No Problems in Pool ────────────────────────────────────────────────────
-  if (pool.total === 0) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-background p-6 text-center space-y-6">
-        <div className="h-20 w-20 rounded-3xl bg-primary/10 flex items-center justify-center">
-          <Upload className="h-10 w-10 text-primary opacity-60" />
-        </div>
-        <h1 className="text-4xl font-black italic uppercase tracking-tighter">
-          NO PROBLEMS YET
-        </h1>
-        <p className="text-muted-foreground max-w-sm">
-          Import your solved problems from LeetCode or add them manually. Your
-          quiz pool will be built from your solved problems.
-        </p>
-        <div className="flex gap-3">
-          <Button asChild size="lg" className="rounded-xl px-8 font-black italic">
-            <Link href="/import">IMPORT FROM LEETCODE</Link>
-          </Button>
-          <Button
-            variant="outline"
-            size="lg"
-            className="rounded-xl px-8 font-black italic border-white/10"
-            asChild
-          >
-            <Link href="/dashboard">BACK</Link>
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
-  // ── Session Complete → Summary Screen ─────────────────────────────────────
-  if (sessionResult?.completed || (session.completed && !sessionResult)) {
-    const finalSession = session;
-    const correct = finalSession.correctCount;
-    const total = finalSession.items.length;
-    const scorePercent = total > 0 ? Math.round((correct / total) * 100) : 0;
-    const passed = sessionResult?.passed ?? finalSession.passed;
-    const nextQuota = sessionResult?.nextQuota ?? 5;
-
-    return (
-      <SessionSummary
-        correct={correct}
-        total={total}
-        scorePercent={scorePercent}
-        passed={passed}
-        nextQuota={nextQuota}
-        pool={pool}
-        items={finalSession.items}
+      <QuizSummary
+        correct={session?.correctCount || 0}
+        total={items.length}
+        passed={sessionResult?.passed ?? session?.passed ?? false}
+        nextQuota={sessionResult?.nextQuota ?? 5}
+        items={items}
+        pool={data.pool}
       />
     );
   }
 
-  // Guard: if all answered but no sessionResult yet (race), show summary
-  if (unansweredItems.length === 0 && answeredItems.length > 0) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <Loader2 className="h-8 w-8 text-primary animate-spin" />
-      </div>
-    );
-  }
-
-  const currentItem = unansweredItems[0] ?? items[currentItemIndex];
-  if (!currentItem) return null;
-
-  const currentProblem = currentItem.problem;
-
-  // ── Active Quiz UI ─────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col">
-      {/* Header */}
-      <header className="border-b bg-card/50 backdrop-blur-md h-16 flex items-center px-6 sticky top-0 z-50">
-        <div className="flex items-center gap-4 w-full max-w-5xl mx-auto">
-          <Link
-            href="/dashboard"
-            className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-all group"
-          >
-            <ArrowLeft className="h-4 w-4 group-hover:-translate-x-0.5 transition-transform" />
-            <span className="text-[10px] font-black uppercase tracking-widest">
-              QUIT
-            </span>
-          </Link>
-
-          {/* Progress bar */}
-          <div className="flex-1 px-6 flex flex-col gap-1">
-            <div className="flex justify-between text-[9px] font-black uppercase tracking-widest text-muted-foreground">
-              <span>
-                {answeredItems.length} / {items.length} DONE
-              </span>
-              <span className="text-primary">{Math.round(progressPercent)}%</span>
-            </div>
-            <Progress value={progressPercent} className="h-1.5" />
+    <div className="h-screen bg-[#0a0a0c] text-slate-300 flex flex-col overflow-hidden SelectionHighlight">
+      {/* ── HEADER ────────────────────────────────────────── */}
+      <header className="h-12 border-b border-white/5 bg-[#0a0a0c] flex items-center px-4 justify-between shrink-0">
+        <div className="flex items-center gap-4">
+          <Link href="/dashboard" className="text-slate-500 hover:text-white transition-all"><ArrowLeft className="h-4 w-4" /></Link>
+          <div className="h-4 w-[1px] bg-white/10" />
+          <div className="flex items-center gap-2">
+            <Brain className="h-4 w-4 text-primary" />
+            <h1 className="font-bold text-xs uppercase tracking-[0.2em] italic text-white">Revision Interface</h1>
           </div>
+        </div>
 
-          {/* Pool stats */}
-          <div className="hidden md:flex items-center gap-3 text-[9px] font-black uppercase tracking-widest text-muted-foreground">
-            <div className="flex items-center gap-1">
-              <Target className="h-3 w-3 text-primary" />
-              <span>
-                {pool.pending} PENDING
-              </span>
-            </div>
-            <div className="h-3 w-[1px] bg-border" />
-            <div className="flex items-center gap-1">
-              <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-              <span>LIVE SESSION</span>
-            </div>
-          </div>
+        <div className="flex items-center gap-8 flex-1 max-w-xl px-12">
+           <div className="flex-1 flex flex-col gap-1">
+             <div className="flex justify-between text-[8px] font-black text-slate-500 uppercase tracking-widest">
+                <span>Progress: {items.filter(i => i.answered).length} / {items.length}</span>
+                <span className="text-primary">{Math.round(progressPercent)}%</span>
+             </div>
+             <Progress value={progressPercent} className="h-1" />
+           </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+           <Badge variant="outline" className="text-[10px] border-white/5 bg-white/5 uppercase font-bold tracking-tighter hidden sm:flex">
+             {items.length} QUESTIONS TOTAL
+           </Badge>
         </div>
       </header>
 
-      {/* Main quiz area */}
-      <main className="flex-1 flex flex-col items-center justify-center p-6 max-w-3xl mx-auto w-full">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={currentItem.id}
-            initial={{ x: 60, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: -60, opacity: 0 }}
-            transition={{ type: "spring", stiffness: 260, damping: 28 }}
-            className="w-full space-y-6"
-          >
-            {/* Problem card */}
-            <div className="bg-card border border-white/5 rounded-2xl p-8 space-y-6 shadow-2xl">
-              {/* Meta row */}
-              <div className="flex items-start justify-between gap-4 flex-wrap">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <Badge
-                      variant="outline"
-                      className={DIFFICULTY_COLORS[currentProblem.difficulty]}
-                    >
-                      {currentProblem.difficulty}
-                    </Badge>
-                    <Badge
-                      variant="secondary"
-                      className="text-[9px] uppercase tracking-wider opacity-60"
-                    >
-                      {currentProblem.platform}
-                    </Badge>
-                    {currentProblem.tags.slice(0, 3).map((tag) => (
-                      <span
-                        key={tag}
-                        className="text-[9px] font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded uppercase tracking-wider"
-                      >
-                        #{tag}
-                      </span>
-                    ))}
-                  </div>
+      <div className="flex-1 flex overflow-hidden">
+        {/* ── FAR-LEFT SLIM NAVBAR (Numbers Only) ────────── */}
+        <aside className="w-14 border-r border-white/5 bg-[#0d0d0f] flex flex-col items-center py-4 gap-2 shrink-0 overflow-y-auto scrollbar-hide">
+          {items.map((item, idx) => (
+            <button
+              key={item.id}
+              onClick={() => setActiveItemIndex(idx)}
+              className={cn(
+                "h-9 w-9 rounded-xl flex items-center justify-center font-black italic text-sm transition-all relative border",
+                activeItemIndex === idx ? "bg-primary border-primary text-white shadow-lg shadow-primary/20 scale-105" : "bg-white/5 border-transparent text-slate-500 hover:bg-white/10",
+                item.answered && activeItemIndex !== idx && "opacity-40"
+              )}
+            >
+              {idx + 1}
+              {item.answered && (
+                <div className={cn("absolute -top-1 -right-1 h-3 w-3 rounded-full border border-[#0d0d0f] flex items-center justify-center", item.correct ? "bg-green-500" : "bg-red-500")}>
+                  {item.correct ? <CheckCircle2 className="h-2 w-2 text-white" /> : <XCircle className="h-2 w-2 text-white" />}
                 </div>
-                <span className="text-[9px] font-black text-muted-foreground uppercase tracking-widest">
-                  Q{answeredItems.length + 1} OF {items.length}
-                </span>
+              )}
+            </button>
+          ))}
+        </aside>
+
+        {/* ── CONTENT AREA (LeetCode Layout) ──────────────── */}
+        <div className="flex-1 flex overflow-hidden">
+           {/* LEFT PANEL: PROBLEM DETAIL ────────────────────── */}
+           <div className="w-[45%] border-r border-white/5 flex flex-col bg-[#0a0a0c] shrink-0 overflow-hidden">
+              <div className="h-10 border-b border-white/5 bg-[#0d0d0f] flex items-center px-4 gap-4 shrink-0 overflow-x-auto scrollbar-hide">
+                 <button onClick={() => setContentTab("description")} className={cn("text-[9px] font-black uppercase tracking-widest h-full flex items-center px-2 transition-all border-b-2", contentTab === "description" ? "border-primary text-white" : "border-transparent text-slate-500")}>
+                   <FileText className="h-3 w-3 mr-2" /> Description
+                 </button>
+                 <button onClick={() => setContentTab("solution")} className={cn("text-[9px] font-black uppercase tracking-widest h-full flex items-center px-2 transition-all border-b-2", contentTab === "solution" ? "border-primary text-white" : "border-transparent text-slate-500")}>
+                   <Lock className="h-3 w-3 mr-2" /> Discussion & Solution
+                 </button>
               </div>
 
-              {/* Title */}
-              <h2 className="text-2xl font-black italic tracking-tighter leading-tight text-white">
-                {currentProblem.title}
-              </h2>
+              <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-8 custom-scrollbar">
+                <AnimatePresence mode="wait">
+                  {contentTab === "description" ? (
+                    <motion.div key="desc" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} className="space-y-8">
+                       <div className="space-y-3">
+                          <h2 className="text-2xl font-black italic tracking-tighter text-white underline decoration-primary underline-offset-8">
+                            {activeItemIndex + 1}. {currentProblem?.title}
+                          </h2>
+                          <div className="flex items-center gap-3 pt-2">
+                             <span className={cn("font-black italic text-xs uppercase tracking-widest", DIFFICULTY_COLORS[currentProblem?.difficulty ?? 'UNKNOWN'])}>
+                               {currentProblem?.difficulty}
+                             </span>
+                             <div className="h-3 w-[1px] bg-white/10" />
+                             <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{currentProblem?.platform}</span>
+                             <div className="h-3 w-[1px] bg-white/10" />
+                             <div className="flex gap-2">
+                               {currentProblem?.tags.slice(0, 3).map(t => <span key={t} className="text-[9px] font-bold text-slate-600 uppercase">#{t}</span>)}
+                             </div>
+                          </div>
+                       </div>
 
-              {/* Reveal / Code section */}
-              <AnimatePresence mode="wait">
-                {!revealed ? (
-                  <motion.div
-                    key="hidden"
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0 }}
-                    className="pt-4"
-                  >
-                    <Button
-                      size="lg"
-                      className="w-full h-14 text-base font-black italic tracking-wide bg-gradient-to-r from-primary to-indigo-600 hover:opacity-90 shadow-lg shadow-primary/20 rounded-xl"
-                      onClick={() => setRevealed(true)}
-                    >
-                      <Eye className="mr-2 h-5 w-5" />
-                      REVEAL SOLUTION
-                    </Button>
-                    <p className="text-center text-[10px] text-muted-foreground mt-3 font-bold uppercase tracking-widest">
-                      Try recalling the solution before revealing
-                    </p>
-                  </motion.div>
-                ) : (
-                  <motion.div
-                    key="revealed"
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: "auto" }}
-                    className="space-y-6 pt-4 border-t border-white/5"
-                  >
-                    {/* Code block */}
-                    <div className="bg-[#0b0e14] rounded-xl border border-white/5 p-5 relative group">
-                      <div className="absolute top-3 right-3">
-                        <span className="text-[9px] uppercase font-bold text-muted-foreground tracking-widest bg-muted px-2 py-0.5 rounded">
-                          {currentProblem.language}
+                       <div className="space-y-6">
+                          <div className="space-y-2">
+                             <div className="flex items-center gap-2 text-primary">
+                                <Info className="h-4 w-4" />
+                                <h4 className="text-[10px] font-black uppercase tracking-widest">Problem Description</h4>
+                             </div>
+                             <div className="bg-white/2 border border-white/5 rounded-2xl p-6 shadow-inner">
+                                <div className="text-sm text-slate-300 leading-relaxed font-medium prose prose-invert max-w-none">
+                                   {currentProblem?.description ? (
+                                      <div dangerouslySetInnerHTML={{ __html: currentProblem.description }} />
+                                   ) : (currentItem as any).problem.aiNotes?.status === "PROCESSING" ? (
+                                      <div className="flex flex-col items-center justify-center py-8 space-y-4 text-center">
+                                         <Loader2 className="h-8 w-8 animate-spin text-primary/40" />
+                                         <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 italic">Gemini is reconstructing this problem for you now...</p>
+                                      </div>
+                                   ) : (
+                                      <p>{(currentItem as any).problem.aiNotes?.content?.problemDescription || 
+                                       "Awaiting detailed technical breakdown from Gemini... Use the 'Key Insight' below and original code to trigger your recall in the meantime."}</p>
+                                   )}
+                                </div>
+                                {currentProblem?.platformUrl && (
+                                   <div className="pt-4 mt-4 border-t border-white/5">
+                                      <a href={currentProblem.platformUrl} target="_blank" className="inline-flex items-center text-[9px] font-black text-primary uppercase hover:underline">
+                                         Open original in {currentProblem.platform} <ExternalLink className="h-3 w-3 ml-1" />
+                                      </a>
+                                   </div>
+                                )}
+                             </div>
+                          </div>
+
+                          <div className="bg-primary/5 border border-primary/20 rounded-2xl p-6 relative overflow-hidden group">
+                             <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:scale-110 transition-transform"><Lightbulb className="h-12 w-12 text-primary" /></div>
+                             <h4 className="text-[10px] font-black uppercase tracking-widest text-primary mb-3">Key Flashcard Insight</h4>
+                             <p className="text-sm text-slate-300 italic leading-relaxed">
+                                {(currentItem as any).problem.aiNotes?.content?.keyInsight || 
+                                 "Identify the pattern: Sliding Window, Two Pointers, or DP?"}
+                             </p>
+                          </div>
+                       </div>
+                    </motion.div>
+                  ) : (
+                    <motion.div key="sol" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} className="space-y-6 flex flex-col h-full">
+                       <div className="p-4 bg-white/5 border border-white/10 rounded-2xl flex items-center gap-3">
+                          <AlertTriangle className="h-5 w-5 text-yellow-500" />
+                          <p className="text-xs font-bold text-slate-400">Comparing your memory with the actual solution often leads to the highest retention rate.</p>
+                       </div>
+                       <div className="flex-1 bg-black/40 border border-white/5 rounded-2xl overflow-hidden flex flex-col">
+                          <div className="p-3 border-b border-white/5 flex items-center justify-between px-5 bg-slate-900/30">
+                             <span className="text-[9px] font-black uppercase text-primary italic">Correct Base Logic ({currentProblem?.language})</span>
+                             <History className="h-4 w-4 text-slate-600" />
+                          </div>
+                          <div className="flex-1 overflow-auto p-6 font-mono text-sm leading-relaxed text-blue-300/80 scrollbar-thin">
+                             <pre className="whitespace-pre-wrap">{currentProblem?.solutionCode}</pre>
+                          </div>
+                       </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+           </div>
+
+           {/* RIGHT PANEL: EDITOR ───────────────────────────── */}
+           <div className="flex-1 flex flex-col bg-[#0b0e14] relative overflow-hidden">
+              <div className="h-10 border-b border-white/5 bg-[#0d0d0f] flex items-center px-4 justify-between shrink-0">
+                 <div className="flex items-center gap-2">
+                    <Code2 className="h-4 w-4 text-primary" />
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Your Memory Buffer ({currentProblem?.language || "CPP"})</span>
+                 </div>
+                 <Badge variant="outline" className="text-[8px] font-mono border-white/10 uppercase py-0 px-2 h-5">AUTOSAVE: ON</Badge>
+              </div>
+
+              <div className="flex-1 relative">
+                <Editor
+                  height="100%"
+                  theme="vs-dark"
+                  language={currentProblem?.language?.toLowerCase() || "cpp"}
+                  value={codeAttempt[currentItem.id] || ""}
+                  onChange={(v) => currentItem && setCodeAttempt(p => ({ ...p, [currentItem.id]: v || "" }))}
+                  options={{
+                    fontSize: 14,
+                    fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+                    minimap: { enabled: false },
+                    padding: { top: 24, bottom: 24 },
+                    lineNumbers: "on",
+                    automaticLayout: true,
+                    scrollBeyondLastLine: false,
+                    smoothScrolling: true,
+                    cursorSmoothCaretAnimation: "on",
+                  }}
+                />
+              </div>
+
+              {/* ACTION FOOTER ─────────────────────────────── */}
+              <footer className="h-14 border-t border-white/10 bg-[#0d0d0f] flex items-center px-6 justify-between shrink-0">
+                 {!currentItem.answered ? (
+                   <div className="flex items-center justify-between w-full">
+                      <div className="flex items-center gap-2">
+                         <Target className="h-4 w-4 text-primary opacity-50" />
+                         <span className="text-[9px] font-black uppercase tracking-widest text-slate-500 italic">Mark yourself based on the comparison tab</span>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => answerMutation.mutate({ itemId: currentItem!.id, correct: false })}
+                          disabled={answerMutation.isPending}
+                          className="h-9 px-6 rounded-lg font-black text-[10px] uppercase italic bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/20"
+                        >
+                          Mark Wrong
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={() => answerMutation.mutate({ itemId: currentItem!.id, correct: true })}
+                          disabled={answerMutation.isPending}
+                          className="h-9 px-6 rounded-lg font-black text-[10px] uppercase italic bg-primary text-white hover:bg-primary/90 shadow-md shadow-primary/20"
+                        >
+                          {answerMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <><CheckCircle2 className="mr-2 h-4 w-4" /> Got it Correct</>}
+                        </Button>
+                      </div>
+                   </div>
+                 ) : (
+                   <div className="flex items-center justify-between w-full">
+                      <div className="flex items-center gap-3">
+                        <div className={cn("h-7 w-7 rounded-lg flex items-center justify-center border", currentItem!.correct ? "bg-green-500/10 border-green-500/20 text-green-500" : "bg-red-500/10 border-red-500/20 text-red-500")}>
+                           {currentItem!.correct ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+                        </div>
+                        <span className={cn("text-[10px] font-black uppercase italic", currentItem!.correct ? "text-green-500" : "text-red-500")}>
+                           {currentItem!.correct ? "Accepted Review" : "Needs Further Practice"}
                         </span>
                       </div>
-                      <pre className="text-sm font-mono text-blue-300/90 leading-relaxed overflow-x-auto whitespace-pre-wrap max-h-64 overflow-y-auto pr-12">
-                        {currentProblem.solutionCode}
-                      </pre>
-                    </div>
-
-                    {/* Answer buttons */}
-                    <div className="space-y-2">
-                      <p className="text-center text-[10px] font-black uppercase tracking-widest text-muted-foreground">
-                        HOW WELL DID YOU RECALL IT?
-                      </p>
-                      <div className="grid grid-cols-2 gap-3">
-                        <Button
-                          size="lg"
-                          variant="outline"
-                          disabled={answerMutation.isPending}
-                          onClick={() =>
-                            answerMutation.mutate({
-                              itemId: currentItem.id,
-                              correct: false,
-                            })
-                          }
-                          className="h-14 font-black text-base border-red-500/30 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/50 rounded-xl transition-all group"
-                        >
-                          <XCircle className="mr-2 h-5 w-5 opacity-60 group-hover:opacity-100" />
-                          DIDN'T GET IT
-                        </Button>
-                        <Button
-                          size="lg"
-                          disabled={answerMutation.isPending}
-                          onClick={() =>
-                            answerMutation.mutate({
-                              itemId: currentItem.id,
-                              correct: true,
-                            })
-                          }
-                          className="h-14 font-black text-base bg-gradient-to-r from-green-600 to-emerald-600 hover:opacity-90 rounded-xl shadow-md shadow-green-500/20 transition-all group"
-                        >
-                          {answerMutation.isPending ? (
-                            <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                          ) : (
-                            <CheckCircle2 className="mr-2 h-5 w-5 opacity-80 group-hover:opacity-100" />
-                          )}
-                          GOT IT!
-                        </Button>
-                      </div>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-
-            {/* Upcoming pills */}
-            {unansweredItems.length > 1 && (
-              <div className="flex gap-2 flex-wrap justify-center">
-                {unansweredItems.slice(1, 6).map((item, idx) => (
-                  <div
-                    key={item.id}
-                    className="flex items-center gap-1 bg-card border border-white/5 px-3 py-1 rounded-full text-[9px] font-black text-muted-foreground uppercase tracking-wider"
-                  >
-                    <span className="text-primary opacity-60">{idx + 2}.</span>
-                    <span className="max-w-[100px] truncate">
-                      {item.problem.title}
-                    </span>
-                  </div>
-                ))}
-                {unansweredItems.length > 6 && (
-                  <div className="bg-card border border-white/5 px-3 py-1 rounded-full text-[9px] font-black text-muted-foreground uppercase tracking-wider">
-                    +{unansweredItems.length - 6} MORE
-                  </div>
-                )}
-              </div>
-            )}
-          </motion.div>
-        </AnimatePresence>
-      </main>
-    </div>
-  );
-}
-
-// ── Session Summary Component ─────────────────────────────────────────────────
-
-function SessionSummary({
-  correct,
-  total,
-  scorePercent,
-  passed,
-  nextQuota,
-  pool,
-  items,
-}: {
-  correct: number;
-  total: number;
-  scorePercent: number;
-  passed: boolean;
-  nextQuota: number;
-  pool: PoolStats;
-  items: QuizItem[];
-}) {
-  const wrongItems = items.filter((i) => i.correct === false);
-
-  return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center p-6 bg-gradient-to-b from-background to-card/20">
-      <div className="w-full max-w-xl space-y-8">
-        {/* Trophy / Score */}
-        <motion.div
-          initial={{ scale: 0, rotate: -10 }}
-          animate={{ scale: 1, rotate: 0 }}
-          transition={{ type: "spring", stiffness: 200, damping: 18 }}
-          className="text-center space-y-4"
-        >
-          <div
-            className={`h-24 w-24 mx-auto rounded-3xl flex items-center justify-center shadow-2xl ${
-              passed
-                ? "bg-gradient-to-br from-yellow-400 to-orange-500 shadow-yellow-500/30"
-                : "bg-gradient-to-br from-card to-muted shadow-none border border-white/10"
-            }`}
-          >
-            {passed ? (
-              <Trophy className="h-12 w-12 text-white" />
-            ) : (
-              <Brain className="h-12 w-12 text-muted-foreground" />
-            )}
-          </div>
-
-          <div>
-            <h1 className="text-5xl font-black italic tracking-tighter leading-none">
-              {passed ? "SESSION CLEARED." : "KEEP GOING."}
-            </h1>
-            <p className="text-muted-foreground mt-2 text-base">
-              {passed
-                ? "You passed today's session! Quota increases tomorrow."
-                : "You didn't hit 70% — wrong answers will be re-queued for tomorrow."}
-            </p>
-          </div>
-        </motion.div>
-
-        {/* Score Card */}
-        <motion.div
-          initial={{ y: 24, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.2 }}
-          className="bg-card border border-white/5 rounded-2xl p-6 space-y-5 shadow-xl"
-        >
-          {/* Big score */}
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">
-                TODAY'S SCORE
-              </p>
-              <p className="text-6xl font-black italic tracking-tighter leading-none mt-1">
-                <span className={passed ? "text-green-400" : "text-red-400"}>
-                  {correct}
-                </span>
-                <span className="text-muted-foreground text-4xl">/{total}</span>
-              </p>
-            </div>
-            <div className="text-right">
-              <div
-                className={`text-5xl font-black italic ${
-                  passed ? "text-green-400" : "text-yellow-400"
-                }`}
-              >
-                {scorePercent}%
-              </div>
-              <p className="text-[9px] font-black text-muted-foreground uppercase tracking-widest mt-1">
-                {passed ? "PASSING" : "NEEDS 70%"}
-              </p>
-            </div>
-          </div>
-
-          {/* Score bar */}
-          <div className="space-y-1">
-            <Progress
-              value={scorePercent}
-              className={`h-3 ${
-                passed ? "[&>*]:bg-green-500" : "[&>*]:bg-yellow-500"
-              }`}
-            />
-            <div className="flex justify-between text-[9px] font-bold text-muted-foreground">
-              <span>{correct} CORRECT</span>
-              <span>{total - correct} WRONG → RE-QUEUED</span>
-            </div>
-          </div>
-
-          {/* Stats grid */}
-          <div className="grid grid-cols-3 gap-3">
-            <StatBox
-              label="QUOTA TOMORROW"
-              value={nextQuota}
-              icon={<Target className="h-4 w-4" />}
-              color={passed ? "text-green-400" : "text-muted-foreground"}
-            />
-            <StatBox
-              label="POOL SIZE"
-              value={pool.total}
-              icon={<Brain className="h-4 w-4" />}
-              color="text-primary"
-            />
-            <StatBox
-              label="STILL UNSEEN"
-              value={pool.pending}
-              icon={<Shuffle className="h-4 w-4" />}
-              color={pool.pending > 0 ? "text-yellow-400" : "text-green-400"}
-            />
-          </div>
-
-          {/* Adaptive quota info */}
-          {passed && nextQuota > total && (
-            <div className="flex items-center gap-2 bg-green-500/5 border border-green-500/20 rounded-xl p-3">
-              <TrendingUp className="h-4 w-4 text-green-500 flex-shrink-0" />
-              <p className="text-xs text-green-400 font-bold">
-                Quota increased to {nextQuota} questions tomorrow! Keep the
-                streak going.
-              </p>
-            </div>
-          )}
-        </motion.div>
-
-        {/* Wrong answers list */}
-        {wrongItems.length > 0 && (
-          <motion.div
-            initial={{ y: 24, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            transition={{ delay: 0.35 }}
-            className="bg-card border border-red-500/10 rounded-2xl p-5 space-y-3"
-          >
-            <div className="flex items-center gap-2">
-              <RotateCcw className="h-4 w-4 text-red-400" />
-              <p className="text-xs font-black uppercase tracking-widest text-red-400">
-                RE-QUEUED FOR TOMORROW ({wrongItems.length})
-              </p>
-            </div>
-            <div className="space-y-2">
-              {wrongItems.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex items-center justify-between gap-2 py-1.5 border-b border-white/5 last:border-0"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <XCircle className="h-3.5 w-3.5 text-red-400 flex-shrink-0" />
-                    <span className="text-sm font-bold truncate">
-                      {item.problem.title}
-                    </span>
-                  </div>
-                  <Badge
-                    variant="outline"
-                    className={`text-[8px] flex-shrink-0 ${DIFFICULTY_COLORS[item.problem.difficulty]}`}
-                  >
-                    {item.problem.difficulty}
-                  </Badge>
-                </div>
-              ))}
-            </div>
-          </motion.div>
-        )}
-
-        {/* CTA Buttons */}
-        <motion.div
-          initial={{ y: 16, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.45 }}
-          className="flex gap-3"
-        >
-          <Button
-            size="lg"
-            variant="outline"
-            className="flex-1 h-13 font-black italic border-white/10 rounded-xl"
-            asChild
-          >
-            <Link href="/dashboard">BACK TO DASHBOARD</Link>
-          </Button>
-          <Button
-            size="lg"
-            className="flex-1 h-13 font-black italic rounded-xl bg-gradient-to-r from-primary to-indigo-600 shadow-lg shadow-primary/20"
-            asChild
-          >
-            <Link href="/problems">
-              <ChevronRight className="mr-2 h-4 w-4" />
-              VIEW PROBLEMS
-            </Link>
-          </Button>
-        </motion.div>
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          const nextIdx = items.findIndex((i, idx) => !i.answered && idx > activeItemIndex);
+                          const finalNext = nextIdx !== -1 ? nextIdx : items.findIndex(i => !i.answered);
+                          if (finalNext !== -1) setActiveItemIndex(finalNext);
+                        }}
+                        className="h-9 px-5 rounded-lg font-black text-[10px] uppercase italic bg-white/5 border border-white/10 text-white hover:bg-white/10"
+                      >
+                         Jump to next <ChevronRight className="ml-1 h-4 w-4" />
+                      </Button>
+                   </div>
+                 )}
+              </footer>
+           </div>
+        </div>
       </div>
     </div>
   );
 }
 
-// ── Tiny stat box helper ───────────────────────────────────────────────────────
+// ── Summary Page (Unchanged but ensuring it exists) ───────────────────────────
 
-function StatBox({
-  label,
-  value,
-  icon,
-  color,
-}: {
-  label: string;
-  value: number;
-  icon: React.ReactNode;
-  color: string;
-}) {
+function QuizSummary({ correct, total, passed, nextQuota, items, pool }: { correct: number, total: number, passed: boolean, nextQuota: number, items: QuizItem[], pool: PoolStats }) {
   return (
-    <div className="bg-background/60 rounded-xl p-3 space-y-1.5 text-center border border-white/5">
-      <div className={`flex justify-center ${color}`}>{icon}</div>
-      <p className={`text-2xl font-black italic tabular-nums ${color}`}>
-        {value}
-      </p>
-      <p className="text-[8px] font-black text-muted-foreground uppercase tracking-widest">
-        {label}
-      </p>
+    <div className="h-screen w-full bg-slate-950 text-slate-200 flex flex-col items-center justify-center p-8 overflow-y-auto">
+       <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="w-full max-w-4xl space-y-12">
+          <div className="text-center space-y-4">
+             <div className="h-20 w-20 bg-primary/10 rounded-3xl mx-auto flex items-center justify-center border border-primary/20"><Trophy className="h-10 w-10 text-primary" /></div>
+             <h1 className="text-5xl font-black italic tracking-tighter uppercase underline decoration-primary underline-offset-8">Session Completed</h1>
+             <p className="text-slate-500 uppercase font-bold tracking-widest text-sm">Accuracy: {Math.round((correct / total) * 100)}%</p>
+          </div>
+
+          <div className="grid grid-cols-3 gap-6">
+             <StatItem label="SOLVED" value={`${correct}/${total}`} sub="Accuracy" color="text-primary" />
+             <StatItem label="TOMORROW" value={nextQuota} sub="New Quota" color="text-white" />
+             <StatItem label="PENDING" value={pool.pending} sub="In Pool" color="text-yellow-500" />
+          </div>
+
+          <div className="flex gap-4 pt-8">
+             <Button asChild variant="outline" className="flex-1 h-16 rounded-2xl font-black italic uppercase border-white/10"><Link href="/dashboard">Dashboard</Link></Button>
+             <Button asChild className="flex-1 h-16 rounded-2xl font-black italic uppercase bg-primary text-white shadow-xl shadow-primary/20"><Link href="/problems">Problems</Link></Button>
+          </div>
+       </motion.div>
+    </div>
+  );
+}
+
+function StatItem({ label, value, sub, color }: any) {
+  return (
+    <div className="bg-white/2 border border-white/5 p-8 rounded-[2rem] text-center space-y-2">
+      <div className={cn("text-4xl font-black italic", color)}>{value}</div>
+      <div className="text-[9px] font-black uppercase text-slate-500 tracking-[0.2em]">{label}</div>
     </div>
   );
 }

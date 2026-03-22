@@ -101,6 +101,7 @@ model Problem {
   platform        Platform   @default(LEETCODE)
   platformId      String?
   platformUrl     String?
+  description     String?    // Rich markdown or plain text problem description
 
   difficulty      Difficulty @default(UNKNOWN)
   tags            String[]   @default([])

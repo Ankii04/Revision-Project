@@ -198,7 +198,7 @@ export async function fetchLeetCodeSubmissionsPage(
 export async function fetchSubmissionDetail(
   submissionId: string,
   sessionCookie: string
-): Promise<{ code: string; difficulty: string; tags: string[] }> {
+): Promise<{ code: string; difficulty: string; tags: string[]; description: string }> {
   const GRAPHQL_URL = "https://leetcode.com/graphql/";
 
   const query = `
@@ -207,6 +207,7 @@ export async function fetchSubmissionDetail(
         code
         question {
           difficulty
+          content
           topicTags { name slug }
         }
       }
@@ -242,6 +243,7 @@ export async function fetchSubmissionDetail(
         code: string;
         question: {
           difficulty: string;
+          content: string;
           topicTags: Array<{ name: string; slug: string }>;
         };
       };
@@ -250,13 +252,14 @@ export async function fetchSubmissionDetail(
 
   const details = data?.data?.submissionDetails;
   if (!details) {
-    return { code: "", difficulty: "UNKNOWN", tags: [] };
+    return { code: "", difficulty: "UNKNOWN", tags: [], description: "" };
   }
 
   return {
     code: details.code,
     difficulty: LC_DIFFICULTY_MAP[details.question.difficulty] ?? "UNKNOWN",
     tags: details.question.topicTags.map((t) => t.slug),
+    description: details.question.content || "",
   };
 }
 

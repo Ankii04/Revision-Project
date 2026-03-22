@@ -92,6 +92,7 @@ const importWorker = new Worker(
             platform: "LEETCODE",
             platformId: sub.id,
             platformUrl: `https://leetcode.com${sub.url}`,
+            description: detail.description,
             difficulty: detail.difficulty as any,
             tags: detail.tags,
             solutionCode: detail.code,
@@ -149,12 +150,14 @@ const aiNotesWorker = new Worker(
     try {
       await generateAiNotes(problemId);
       console.log(`✅ [AI JOB DONE] Problem ID: ${problemId}`);
+      // Add a 5s gap to stay within the 15 RPM free tier limit safely
+      await new Promise(r => setTimeout(r, 5000));
     } catch (error) {
       console.error(`❌ [AI JOB FAILED] Problem ID: ${problemId}`, error);
       throw error;
     }
   },
-  { connection: connection as any, concurrency: 2 } // Limit concurrent Gemini API calls
+  { connection: connection as any, concurrency: 1 } // Concurrency 1 for stability with free tier
 );
 
 console.log("🚀 Workers started and listening for jobs...");

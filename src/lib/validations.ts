@@ -36,6 +36,7 @@ export const CreateProblemSchema = z.object({
   platform: PlatformSchema,
   platformId: z.string().optional(),
   platformUrl: z.string().url().optional(),
+  description: z.string().optional(),
   difficulty: DifficultySchema.optional().default("UNKNOWN"),
   tags: z.array(z.string().max(50)).max(20).optional().default([]),
   companies: z.array(z.string().max(100)).max(30).optional().default([]),

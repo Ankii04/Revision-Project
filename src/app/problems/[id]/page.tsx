@@ -69,6 +69,7 @@ export default function ProblemDetail() {
       const status = query.state.data?.aiNotes?.status;
       return status === "PENDING" || status === "PROCESSING" ? 3000 : false;
     },
+    staleTime: 30 * 1000, // Don't refetch on window focus unless 30s old
   });
 
   // 2. Mutation for regenerating AI notes

@@ -1,10 +1,11 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { RevisionCard } from "@/components/revision-card";
 import { formatRelativeTime } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
+import { useEffect } from "react";
 import Link from "next/link";
 import {
   BarChart2,
@@ -27,41 +28,36 @@ import { Badge } from "@/components/ui/badge";
  * Displays user progress and revision queue status.
  */
 export default function Dashboard() {
-  // 1. Core Overview Stats
-  const { data: stats } = useQuery({
-    queryKey: ["analytics-overview"],
-    queryFn: async () => {
-      const res = await fetch("/api/analytics");
-      return (await res.json()).data.overview;
-    },
-  });
+  const queryClient = useQueryClient();
 
-  // 2. Heatmap Data
-  const { data: heatmapData } = useQuery({
-    queryKey: ["analytics-heatmap"],
+  // Single batch fetch for all dashboard data (fast initial load)
+  const { data: dashboard, isLoading } = useQuery({
+    queryKey: ["dashboard-overview"],
     queryFn: async () => {
-      const res = await fetch("/api/analytics?type=heatmap");
+      const res = await fetch("/api/dashboard/overview");
+      if (!res.ok) throw new Error("Sync Failed");
       return (await res.json()).data;
     },
+    staleTime: 60 * 1000, // 1 minute fresh
   });
 
-  // 3. Weak Topics Data
-  const { data: weakTopics } = useQuery({
-    queryKey: ["analytics-weak-topics"],
-    queryFn: async () => {
-      const res = await fetch("/api/analytics?type=weak-topics&limit=3");
-      return (await res.json()).data;
-    },
-  });
+  // Pull individual items from the combined state
+  const stats = dashboard?.stats;
+  const heatmapData = dashboard?.heatmap;
+  const weakTopics = dashboard?.weakTopics;
+  const queue = dashboard?.queue;
 
-  // 4. Revision Queue
-  const { data: queue } = useQuery({
-    queryKey: ["revision-queue"],
-    queryFn: async () => {
-      const res = await fetch("/api/revision/queue?limit=4");
-      return (await res.json()).data.queue;
-    },
-  });
+  // Prefetch revision state for instant navigation
+  useEffect(() => {
+    queryClient.prefetchQuery({
+      queryKey: ["quiz-state"],
+      queryFn: async () => {
+        const res = await fetch("/api/revision/quiz-state");
+        return (await res.json()).data;
+      },
+    });
+  }, [queryClient]);
+
 
   const containers = {
     hidden: { opacity: 0 },

@@ -3,6 +3,20 @@ import { apiSuccess, apiError, withErrorHandler } from "@/lib/api-response";
 import { getProblems, createProblem } from "@/services/problem.service";
 import { GetProblemsQuerySchema, CreateProblemSchema } from "@/lib/validations";
 import { enqueueAiNoteJob } from "@/lib/queues";
+import { NextResponse } from "next/server";
+
+export async function OPTIONS(req: Request) {
+  const origin = req.headers.get("origin") || "*";
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": origin,
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Credentials": "true",
+    },
+  });
+}
 
 /**
  * GET /api/problems
