@@ -1,4 +1,5 @@
 import "dotenv/config";
+import http from "http";
 import { Worker } from "bullmq";
 
 import { getRedisConnection } from "@/lib/bullmq-redis";
@@ -160,7 +161,15 @@ const aiNotesWorker = new Worker(
   { connection: connection as any, concurrency: 1 } // Concurrency 1 for stability with free tier
 );
 
-console.log("🚀 Workers started and listening for jobs...");
+// 🏥 DUMMY SERVER FOR RENDER HEALTH CHECKS
+// This satisfies Render's 'Web Service' port check for free tier deployment
+const port = process.env.PORT || 10000;
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("Worker is healthy");
+}).listen(port);
+
+console.log(`🚀 Workers started and listening for jobs on port ${port}...`);
 
 process.on("SIGTERM", async () => {
   await importWorker.close();
