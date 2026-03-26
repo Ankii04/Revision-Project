@@ -6,7 +6,7 @@ import { enqueueAiNoteJob } from "@/lib/queues";
 import { NextResponse } from "next/server";
 
 export async function OPTIONS(req: Request) {
-  const origin = req.headers.get("origin") || "*";
+  const origin = req.headers.get("origin") || "";
   return new NextResponse(null, {
     status: 204,
     headers: {
@@ -59,7 +59,7 @@ export const POST = withErrorHandler(async (req) => {
   await enqueueAiNoteJob(problem.id);
 
   const res = apiSuccess({ problem }, 201);
-  const origin = req.headers.get("origin") || "*";
+  const origin = req.headers.get("origin") || "";
   res.headers.set("Access-Control-Allow-Origin", origin);
   res.headers.set("Access-Control-Allow-Credentials", "true");
   return res;
