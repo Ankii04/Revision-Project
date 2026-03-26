@@ -13,7 +13,8 @@ const isPublicRoute = createRouteMatcher([
 
 export default clerkMiddleware(async (auth, request) => {
   // If the route is not public, protect it (redirect to sign-in if not authed)
-  if (!isPublicRoute(request)) {
+  // EXCEPT for OPTIONS requests (CORS preflight), which should always be allowed
+  if (!isPublicRoute(request) && request.method !== "OPTIONS") {
     await auth.protect();
   }
 

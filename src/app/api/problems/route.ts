@@ -58,5 +58,9 @@ export const POST = withErrorHandler(async (req) => {
   // Queue AI notes generation
   await enqueueAiNoteJob(problem.id);
 
-  return apiSuccess({ problem }, 201);
+  const res = apiSuccess({ problem }, 201);
+  const origin = req.headers.get("origin") || "*";
+  res.headers.set("Access-Control-Allow-Origin", origin);
+  res.headers.set("Access-Control-Allow-Credentials", "true");
+  return res;
 });

@@ -2,6 +2,17 @@ import type { RecallRating, RevisionCard } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ratingToQuality } from "@/lib/utils";
 
+// ─── 4-Tier Queue Constants ───────────────────────────────────────────────────
+
+/** Maximum number of problems in a daily session */
+const DAILY_QUOTA = 5;
+
+/**
+ * Max number of picks from a single topic tag before the guard kicks in
+ * and forces the next pick from a different tag.
+ */
+const TOPIC_MAX_BEFORE_GUARD = 2;
+
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 export interface SM2Result {
@@ -38,37 +49,41 @@ export function calculateSM2(
   card: Pick<RevisionCard, "easeFactor" | "interval" | "repetition">,
   rating: RecallRating
 ): SM2Result {
-  const quality = ratingToQuality(rating);
-
   let { easeFactor, interval, repetition } = card;
 
-  if (quality < 3) {
-    // Failed review — reset to beginning
-    repetition = 0;
-    interval = 1;
-  } else {
-    // Successful review — calculate next interval
-    if (repetition === 0) {
+  // ── Simplified confidence→interval mapping (replaces pure SM-2 schedule) ──
+  //   AGAIN (0) → 1 day  (hard reset)
+  //   HARD  (1) → 2 days
+  //   GOOD  (3) → 7 days
+  //   EASY  (5) → max(14, interval * 2) — multiplicative chain: 14→30→60→90…
+  switch (rating) {
+    case "AGAIN":
+      repetition = 0;
       interval = 1;
-    } else if (repetition === 1) {
-      interval = 6;
-    } else {
-      interval = Math.round(interval * easeFactor);
-    }
-    repetition += 1;
+      break;
+    case "HARD":
+      // Slight penalty to ease factor; keep repetition count advancing
+      repetition = Math.max(1, repetition);
+      interval = 2;
+      break;
+    case "GOOD":
+      repetition += 1;
+      interval = 7;
+      break;
+    case "EASY":
+      repetition += 1;
+      interval = Math.max(14, Math.round(interval * 2));
+      break;
   }
 
-  // Update ease factor: EF' = EF + (0.1 - (5-q)*(0.08 + (5-q)*0.02))
+  // Keep the SM-2 ease factor update so long-term scheduling stays adaptive
+  const quality = ratingToQuality(rating);
   easeFactor =
     easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
-
-  // Clamp ease factor to minimum of 1.3 (SM-2 spec)
   easeFactor = Math.max(1.3, easeFactor);
 
-  // Calculate the next due date
   const newDueDate = new Date();
   newDueDate.setDate(newDueDate.getDate() + interval);
-  // Set to start of day to avoid time-of-day drift
   newDueDate.setHours(0, 0, 0, 0);
 
   return { newInterval: interval, newEaseFactor: easeFactor, newRepetition: repetition, newDueDate };
@@ -106,6 +121,8 @@ export async function getRevisionQueue(
           platformUrl: true,
           language: true,
           solutionCode: true,
+          description: true,
+          aiNotes: true,
         },
       },
     },
@@ -281,4 +298,219 @@ export async function getRevisionHistory(userId: string, problemId: string) {
     where: { userId, problemId },
     orderBy: { reviewedAt: "desc" },
   });
+}
+
+// ─── 4-Tier Daily Priority Queue ─────────────────────────────────────────────
+
+export interface DailyQueueItem {
+  revisionCardId: string;
+  problemId: string;
+  title: string;
+  difficulty: string;
+  platform: string;
+  platformUrl: string | null;
+  tags: string[];
+  language: string;
+  solutionCode: string;
+  dueDate: Date;
+  interval: number;
+  easeFactor: number;
+  repetition: number;
+  totalReviews: number;
+  /** How many calendar days overdue (negative = future) */
+  daysOverdue: number;
+  /** Which tier this card came from */
+  tier: 1 | 2 | 3 | 4;
+}
+
+/**
+ * Builds today's "Daily 5" session using the 4-tier selection algorithm:
+ *
+ *  Tier 1 — Overdue cards (dueDate < today), sorted most-overdue first
+ *  Tier 2 — Cards due exactly today
+ *  Tier 3 — Unseen cards (never reviewed; repetition === 0)
+ *  Tier 4 — Early pull of upcoming cards to guarantee exactly DAILY_QUOTA picks
+ *
+ * Topic-diversity guard: once any single topic tag has contributed
+ * TOPIC_MAX_BEFORE_GUARD picks, subsequent picks are taken from other topics
+ * until the tag count drops back below the threshold.
+ */
+export async function getDailyPriorityQueue(
+  userId: string,
+  quota = DAILY_QUOTA
+): Promise<DailyQueueItem[]> {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  // ── Shared include for all queries ──────────────────────────────────────
+  const problemSelect = {
+    id: true,
+    title: true,
+    difficulty: true,
+    platform: true,
+    platformUrl: true,
+    tags: true,
+    language: true,
+    solutionCode: true,
+    description: true,
+    aiNotes: true,
+  } as const;
+
+  const cardInclude = { problem: { select: problemSelect } } as const;
+
+  // ── Tier 1: Overdue (dueDate strictly before today) ──────────────────────
+  const tier1 = await prisma.revisionCard.findMany({
+    where: { userId, dueDate: { lt: today } },
+    orderBy: { dueDate: "asc" }, // most overdue first
+    include: cardInclude,
+  });
+
+  // ── Tier 2: Due today ────────────────────────────────────────────────────
+  const tier2 = await prisma.revisionCard.findMany({
+    where: { userId, dueDate: { gte: today, lt: tomorrow } },
+    orderBy: { dueDate: "asc" },
+    include: cardInclude,
+  });
+
+  // ── Tier 3: Unseen (never reviewed) ────────────────────────────────────
+  const tier3 = await prisma.revisionCard.findMany({
+    where: { userId, repetition: 0, totalReviews: 0 },
+    orderBy: { createdAt: "asc" },
+    include: cardInclude,
+  });
+
+  // ── Tier 4: Upcoming (future) — early pull ──────────────────────────────
+  const tier4 = await prisma.revisionCard.findMany({
+    where: { userId, dueDate: { gte: tomorrow } },
+    orderBy: { dueDate: "asc" },
+    include: cardInclude,
+  });
+
+  // ── Merge all tiers and pick up to `quota` with topic-diversity guard ──
+  const orderedCandidates = [...tier1, ...tier2, ...tier3, ...tier4];
+
+  // De-duplicate by revisionCardId (a card can appear in tier3 AND tier1 if it
+  // was never reviewed but is still due today — keep only first occurrence)
+  const seen = new Set<string>();
+  const deduped = orderedCandidates.filter((c) => {
+    if (seen.has(c.id)) return false;
+    seen.add(c.id);
+    return true;
+  });
+
+  // ── Topic-diversity guard ────────────────────────────────────────────────
+  const tagCount: Record<string, number> = {};
+  const picks: typeof deduped = [];
+  const deferred: typeof deduped = []; // candidates temporarily skipped by guard
+
+  for (const card of deduped) {
+    if (picks.length >= quota) break;
+
+    const tags: string[] = card.problem.tags;
+    const dominated = tags.some(
+      (t) => (tagCount[t] ?? 0) >= TOPIC_MAX_BEFORE_GUARD
+    );
+
+    if (dominated) {
+      deferred.push(card);
+      continue;
+    }
+
+    // Accept this card
+    picks.push(card);
+    for (const t of tags) {
+      tagCount[t] = (tagCount[t] ?? 0) + 1;
+    }
+  }
+
+  // If guard emptied a slot, fill from deferred list
+  if (picks.length < quota) {
+    for (const card of deferred) {
+      if (picks.length >= quota) break;
+      picks.push(card);
+    }
+  }
+
+  // ── Map to clean DailyQueueItem shape ────────────────────────────────────
+  return picks.map((card) => {
+    const dueDateMs = card.dueDate.getTime();
+    const todayMs = today.getTime();
+    const daysOverdue = Math.round((todayMs - dueDateMs) / 86_400_000);
+
+    let tier: 1 | 2 | 3 | 4;
+    if (tier1.some((c) => c.id === card.id)) tier = 1;
+    else if (tier2.some((c) => c.id === card.id)) tier = 2;
+    else if (tier3.some((c) => c.id === card.id)) tier = 3;
+    else tier = 4;
+
+    return {
+      revisionCardId: card.id,
+      problemId: card.problemId,
+      title: card.problem.title,
+      difficulty: card.problem.difficulty,
+      platform: card.problem.platform,
+      platformUrl: card.problem.platformUrl,
+      tags: card.problem.tags,
+      language: card.problem.language,
+      solutionCode: card.problem.solutionCode,
+      dueDate: card.dueDate,
+      interval: card.interval,
+      easeFactor: card.easeFactor,
+      repetition: card.repetition,
+      totalReviews: card.totalReviews,
+      daysOverdue,
+      tier,
+    };
+  });
+}
+
+// ─── Upcoming Schedule (for Review Forecaster widget) ─────────────────────────
+
+export interface ScheduleDay {
+  date: string;          // ISO date string "YYYY-MM-DD"
+  count: number;         // number of cards due that day
+}
+
+/**
+ * Returns the count of cards due per day for the next `days` days.
+ * Used by the Review Forecaster / density-schedule widget in the dashboard.
+ */
+export async function getUpcomingSchedule(
+  userId: string,
+  days = 30
+): Promise<ScheduleDay[]> {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const until = new Date(today);
+  until.setDate(until.getDate() + days);
+
+  const cards = await prisma.revisionCard.findMany({
+    where: { userId, dueDate: { gte: today, lt: until } },
+    select: { dueDate: true },
+  });
+
+  // Aggregate by normalized date string
+  const dayMap: Record<string, number> = {};
+
+  for (const card of cards) {
+    const d = new Date(card.dueDate);
+    d.setHours(0, 0, 0, 0);
+    const key = d.toISOString().slice(0, 10);
+    dayMap[key] = (dayMap[key] ?? 0) + 1;
+  }
+
+  // Build ordered array for all days in the window (filling zeros)
+  const result: ScheduleDay[] = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + i);
+    const key = d.toISOString().slice(0, 10);
+    result.push({ date: key, count: dayMap[key] ?? 0 });
+  }
+
+  return result;
 }

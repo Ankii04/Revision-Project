@@ -74,11 +74,20 @@ async function captureSubmission(platform: "LEETCODE" | "GFG") {
   const code = Array.from(document.querySelectorAll(".view-line"))
     .map(line => line.textContent)
     .join("\n") || document.querySelector(".monaco-editor")?.textContent || "";
-  
+
+  // Capture the problem description from the DOM
+  const descriptionElement = 
+    document.querySelector('[data-key="description-content"]') || 
+    document.querySelector(".problem-description") || 
+    document.querySelector(".problem-statement") ||
+    document.querySelector(".question-content");
+  const description = descriptionElement ? descriptionElement.innerHTML : "";
+
   const payload = {
     title,
     slug,
     platform,
+    description,
     solutionCode: code || "// Code not captured",
     language: "PYTHON", 
     submittedAt: new Date().toISOString(),

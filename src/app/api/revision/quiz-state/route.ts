@@ -290,6 +290,8 @@ async function buildTodaySession(userId: string, today: Date) {
               language: true,
               platform: true,
               platformUrl: true,
+              description: true,
+              aiNotes: true,
             },
           },
         },
